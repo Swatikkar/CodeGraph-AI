@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+venv/
+env/
+agentenv/
+
+# Node/Vite
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Generated app data
+backend/uploads/
+backend/chroma_db/
+backend/project_trees/
+backend/artifacts/
+backend/data/
+backend/*.db
+backend/*.sqlite3
+backend/chat_history.db
+backend/codegraph_users.db
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local scratch notes
+frontend things.txt
