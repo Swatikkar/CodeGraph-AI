@@ -124,7 +124,13 @@ class Settings(BaseSettings):
 
     @property
     def resolved_database_url(self) -> str:
-        return self.DATABASE_URL or f"sqlite:///{(self.SQLITE_DIR / 'codegraph_users.db').as_posix()}"
+        if not self.DATABASE_URL:
+            return f"sqlite:///{(self.SQLITE_DIR / 'codegraph_users.db').as_posix()}"
+        if self.DATABASE_URL.startswith("postgresql://"):
+            return self.DATABASE_URL.replace("postgresql://", "postgresql+psycopg://", 1)
+        if self.DATABASE_URL.startswith("postgres://"):
+            return self.DATABASE_URL.replace("postgres://", "postgresql+psycopg://", 1)
+        return self.DATABASE_URL
 
     @property
     def cors_origins(self) -> list[str]:

@@ -8,7 +8,7 @@ The repository includes `render.yaml` with:
 
 - `codegraph-ai-backend`: Docker web service built from `backend/Dockerfile`.
 - `codegraph-ai-frontend`: static site built from `frontend`.
-- `codegraph-ai-postgres`: free PostgreSQL database used for auth users through `DATABASE_URL`.
+- Supabase Postgres: durable demo database used for auth users through `DATABASE_URL`.
 
 The backend Docker command is production-only:
 
@@ -31,6 +31,8 @@ Set these in Render after the services are created:
 Backend:
 
 - `BACKEND_CORS_ORIGINS`: deployed frontend URL, for example `https://codegraph-ai-frontend.onrender.com`
+- `DATABASE_URL`: Supabase pooled Postgres connection string. For the current `codegraph-ai` project, use:
+  `postgresql://postgres.ueudiwhzanhsvxrztulf:<YOUR_DB_PASSWORD>@aws-1-ap-southeast-1.pooler.supabase.com:6543/postgres`
 - `GROQ_API_KEY`
 - `GEMINI_API_KEY`
 - `HUGGINGFACE_API_KEY` if Hugging Face embeddings are needed
@@ -46,13 +48,13 @@ Frontend:
 
 Render free web services have ephemeral local files. In this demo setup:
 
-- User accounts persist only while the free PostgreSQL database exists.
+- User accounts persist in Supabase Postgres.
 - Uploaded projects, generated artifacts, Chroma vector stores, project tree cache, and chat checkpoint SQLite files are local to the backend service and can disappear after redeploy/restart/spin-down.
-- Render free PostgreSQL is suitable for demos, but should not be treated as permanent production data.
+- Supabase free Postgres is suitable for demos, but production usage should review Supabase plan limits and backup needs.
 
 Production-grade persistence should move:
 
-- Auth and chat history to durable PostgreSQL.
+- Auth and chat history to durable PostgreSQL, such as Supabase.
 - Uploads/artifacts to object storage.
 - Vector data to a persistent disk or managed vector database.
 
@@ -63,7 +65,7 @@ If not using Blueprint:
 1. Create a Web Service for `backend`.
 2. Select Docker runtime and use `backend/Dockerfile`.
 3. Set health check path to `/api/health`.
-4. Add the backend environment variables listed above.
+4. Add the backend environment variables listed above, including the Supabase `DATABASE_URL`.
 5. Create a Static Site for `frontend`.
 6. Build command: `cd frontend && npm ci && npm run build`
 7. Publish directory: `frontend/dist`

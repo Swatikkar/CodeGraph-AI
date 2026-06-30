@@ -88,6 +88,7 @@ Render deployment files are included:
 
 - Frontend target: Render Static Site, Vercel, or another static host.
 - Backend target: Render, Railway, Fly-style service, or similar Python host.
+- Database target: Supabase Postgres through `DATABASE_URL` for durable demo auth/users.
 - Required env vars are documented in `backend/.env.example` and `frontend/.env.example`.
 
 For Render, deploy the backend as a Docker web service and the frontend as a static site. The backend production command must bind to Render's assigned port with `0.0.0.0`; `python main.py` is only for local development.
