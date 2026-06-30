@@ -9,6 +9,7 @@ pyjwt
 bcrypt
 gitpython
 httpx
+ddgs
 numpy
 
 langchain
