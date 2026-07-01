@@ -121,6 +121,12 @@ async def process_zip_upload(
         safe_extract_zip(zip_path, root)
         zip_path.unlink(missing_ok=True)
         write_status(current_user.id, slug, "processing", "extract", f"Project '{slug}' uploaded.", 5)
+    except HTTPException:
+        zip_path.unlink(missing_ok=True)
+        if root.exists():
+            shutil.rmtree(root, ignore_errors=True)
+        delete_project_artifacts(current_user.id, slug)
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to handle file upload: {exc}") from exc
 
