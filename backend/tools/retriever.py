@@ -9,6 +9,7 @@ from langchain_core.tools import tool
 
 from config import settings
 from providers import model_router
+from utils.chroma import ensure_chroma_defaults
 from utils.secrets import redact_secrets
 
 
@@ -22,9 +23,11 @@ CACHE_TTL_SECONDS = 3600
 def get_vectorstore(project_name: str) -> Chroma:
     if project_name not in _vectorstore_cache:
         project_db_path = settings.CHROMA_DB_DIR / project_name
+        client = ensure_chroma_defaults(project_db_path)
         _vectorstore_cache[project_name] = Chroma(
             persist_directory=str(project_db_path),
             embedding_function=model_router.embeddings(),
+            client=client,
         )
     return _vectorstore_cache[project_name]
 
