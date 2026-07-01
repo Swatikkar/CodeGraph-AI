@@ -21,8 +21,40 @@ class ChatState(TypedDict):
     provider_events: list
 
 
-supervisor_tools_node = ToolNode([retrieve_code_context, get_project_tree, trusted_web_search])
-debugger_tools_node = ToolNode([retrieve_code_context, trusted_web_search, read_project_file, propose_patch])
+PROJECT_SCOPED_TOOLS = {
+    "retrieve_code_context",
+    "get_project_tree",
+    "read_project_file",
+    "propose_patch",
+}
+
+
+def lock_project_tool_args(state: ChatState) -> ChatState:
+    """Keep project-scoped tool calls bound to the authenticated project namespace."""
+    project_name = state.get("project_name", "")
+    messages = state.get("messages", [])
+    if not project_name or not messages:
+        return state
+
+    last_message = messages[-1]
+    for tool_call in getattr(last_message, "tool_calls", []) or []:
+        if tool_call.get("name") in PROJECT_SCOPED_TOOLS:
+            args = tool_call.setdefault("args", {})
+            if isinstance(args, dict):
+                args["project_name"] = project_name
+    return state
+
+
+_supervisor_tools_node = ToolNode([retrieve_code_context, get_project_tree, trusted_web_search])
+_debugger_tools_node = ToolNode([retrieve_code_context, trusted_web_search, read_project_file, propose_patch])
+
+
+def supervisor_tools_node(state: ChatState):
+    return _supervisor_tools_node.invoke(lock_project_tool_args(state))
+
+
+def debugger_tools_node(state: ChatState):
+    return _debugger_tools_node.invoke(lock_project_tool_args(state))
 
 
 def route_supervisor(state: ChatState) -> Literal["supervisor_tools", "debugger", "__end__"]:
