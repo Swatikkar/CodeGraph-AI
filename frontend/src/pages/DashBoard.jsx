@@ -13,6 +13,7 @@ import {
   AlertCircle,
   Trash2,
 } from "lucide-react";
+import { formatApiError } from "../utils/apiError";
 
 export default function Dashboard() {
   const { user } = useAuth();
@@ -168,17 +169,7 @@ export default function Dashboard() {
       setIsModalOpen(true);
       setProjectName(pendingProjectName);
 
-      let errorMessage = "Failed to ingest project. Please try again.";
-      if (err.response?.data?.detail) {
-        if (Array.isArray(err.response.data.detail)) {
-          errorMessage = err.response.data.detail.map((e) => e.msg).join(" | ");
-        } else {
-          errorMessage = String(err.response.data.detail);
-        }
-      } else if (err.message) {
-        errorMessage = err.message;
-      }
-      setError(errorMessage);
+      setError(formatApiError(err, "Failed to ingest project. Please try again."));
     }
   };
 

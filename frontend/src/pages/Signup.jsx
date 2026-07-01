@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import axios from "axios";
 import { Eye, EyeOff, Network } from "lucide-react";
+import { formatApiError } from "../utils/apiError";
 
 export default function Signup() {
   const navigate = useNavigate();
@@ -21,7 +22,7 @@ export default function Signup() {
         state: { message: "Account created successfully! Please log in." },
       });
     } catch (err) {
-      setError(err.response?.data?.detail || "Failed to create account.");
+      setError(formatApiError(err, "Failed to create account."));
     } finally {
       setLoading(false);
     }

@@ -3,6 +3,7 @@ import { useNavigate, useLocation, Link } from "react-router-dom";
 import axios from "axios";
 import { useAuth } from "../context/AuthContext";
 import { Eye, EyeOff, Network } from "lucide-react";
+import { formatApiError } from "../utils/apiError";
 
 export default function Login() {
   const navigate = useNavigate();
@@ -43,7 +44,7 @@ export default function Login() {
       // Send them directly to their private workspace
       navigate("/dashboard");
     } catch (err) {
-      setError(err.response?.data?.detail || "Invalid credentials.");
+      setError(formatApiError(err, "Invalid credentials."));
     } finally {
       setLoading(false);
     }

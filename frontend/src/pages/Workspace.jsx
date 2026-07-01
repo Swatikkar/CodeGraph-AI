@@ -15,6 +15,7 @@ import {
   Send,
   Sparkles,
 } from "lucide-react";
+import { formatApiError } from "../utils/apiError";
 
 const getAuthHeaders = () => ({
   headers: { Authorization: `Bearer ${localStorage.getItem("token")}` },
@@ -158,7 +159,7 @@ export default function Workspace() {
       });
       setActiveFile({ path: filePath, name: fileName, content: response.data.content });
     } catch (error) {
-      setActiveFile({ path: filePath, name: fileName, content: error.response?.data?.detail || "Could not load file." });
+      setActiveFile({ path: filePath, name: fileName, content: formatApiError(error, "Could not load file.") });
     } finally {
       setLoadingFile(false);
     }
