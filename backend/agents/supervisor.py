@@ -58,11 +58,19 @@ def supervisor_node(state: dict) -> dict:
         or prompt.strip() in {"hello", "hi", "hey"}
     )
     should_use_tools = (should_use_retrieval or should_use_search) and not is_direct_prompt
+    has_tool_results = any(getattr(message, "type", None) == "tool" for message in messages)
 
     response, metadata = model_router.invoke_chat(
         "supervisor_reasoning",
-        [SystemMessage(content=system_prompt)] + messages,
-        tools=tools if should_use_tools else None,
+        [
+            SystemMessage(
+                content=(
+                    system_prompt
+                    + ("\nTool results are already available. Answer now without calling another tool." if has_tool_results else "")
+                )
+            )
+        ] + messages,
+        tools=tools if should_use_tools and not has_tool_results else None,
     )
 
     if _has_xml_tool_call(str(response.content)) and not getattr(response, "tool_calls", None):
