@@ -1,4 +1,5 @@
 import gc
+import os
 import re
 import time
 from pathlib import Path
@@ -34,6 +35,9 @@ def get_vectorstore(project_name: str) -> Chroma:
 
 def close_vectorstore(vectorstore: Chroma | None):
     if vectorstore is None:
+        return
+    if os.name != "nt":
+        gc.collect()
         return
     client = getattr(vectorstore, "_client", None)
     system = getattr(client, "_system", None)
