@@ -11,6 +11,7 @@ from langchain_chroma import Chroma
 from config import settings
 from providers import model_router
 from tools.retriever import close_vectorstore, invalidate_vectorstore_cache
+from utils.chroma import ensure_chroma_defaults
 from utils.secrets import redact_secrets
 
 # Helper to bypass Windows "Access Denied" errors when deleting SQLite files
@@ -117,11 +118,13 @@ def ingest_to_chroma(files_to_process: list, project_name: str, project_root: st
     project_db_path = settings.CHROMA_DB_DIR / project_name
 
     embeddings = model_router.embeddings()
+    client = ensure_chroma_defaults(project_db_path)
 
     vectorstore = Chroma.from_documents(
         documents=all_chunks,
         embedding=embeddings,
-        persist_directory=str(project_db_path)
+        persist_directory=str(project_db_path),
+        client=client,
     )
     close_vectorstore(vectorstore)
 
