@@ -29,11 +29,15 @@ export default function Dashboard() {
   const [selectedFile, setSelectedFile] = useState(null);
   const [error, setError] = useState("");
 
-  // FIX: Use a ref to hold the interval so it's never recreated on projects state change
   const pollIntervalRef = useRef(null);
   const isPollingRef = useRef(false);
-  const maxZipBytes = Number(import.meta.env.VITE_MAX_ZIP_BYTES || 1073741824);
-  const maxZipLabel = `${Math.round(maxZipBytes / 1024 / 1024 / 1024)} GB`;
+  const configuredMaxZipBytes = Number(import.meta.env.VITE_MAX_ZIP_BYTES || 1073741824);
+  const liveDemoMaxZipBytes = import.meta.env.PROD ? 95 * 1024 * 1024 : Number.POSITIVE_INFINITY;
+  const maxZipBytes = Math.min(configuredMaxZipBytes, liveDemoMaxZipBytes);
+  const maxZipLabel =
+    maxZipBytes >= 1024 * 1024 * 1024
+      ? `${Math.round(maxZipBytes / 1024 / 1024 / 1024)} GB`
+      : `${Math.round(maxZipBytes / 1024 / 1024)} MB`;
 
   const displayName = user?.email ? user.email.split("@")[0] : "Developer";
 
@@ -62,7 +66,6 @@ export default function Dashboard() {
   }, []);
 
   const startPolling = useCallback(() => {
-    // FIX: Guard — never create more than one interval at a time
     if (isPollingRef.current) return;
     isPollingRef.current = true;
 
@@ -74,7 +77,6 @@ export default function Dashboard() {
         const fetched = response.data.projects || [];
         setProjects(fetched);
 
-        // Stop polling automatically once all projects are done
         const stillProcessing = fetched.some(
           (p) => p.status !== "ready" && p.status !== "error",
         );
@@ -84,11 +86,9 @@ export default function Dashboard() {
       } catch (err) {
         console.error("Polling error:", err);
       }
-    }, 60000); // Poll every 60 seconds during ingestion — prevents hammering the server while Ollama is running
+    }, 60000);
   }, [stopPolling]);
 
-  // On mount: fetch once, then start polling only if needed
-  // FIX: Named async function avoids react-hooks/set-state-in-effect ESLint warning
   useEffect(() => {
     async function initialize() {
       const fetched = await fetchProjects();
@@ -127,45 +127,62 @@ export default function Dashboard() {
     e.preventDefault();
     setError("");
 
-    setIsModalOpen(false);
-    const pendingProjectName = projectName;
+    const pendingProjectName = projectName.trim();
+    if (!pendingProjectName) {
+      setError("Please enter a project name.");
+      return;
+    }
 
-    // Optimistic UI: Drop the tile immediately with a starting status
-    setProjects((prev) => [
-      ...prev,
-      { name: pendingProjectName, status: "Initializing..." },
-    ]);
+    if (ingestMode === "github" && !repoUrl.trim()) {
+      setError("Please enter a public GitHub repository URL.");
+      return;
+    }
+
+    if (ingestMode === "upload") {
+      if (!selectedFile) {
+        setError("Please choose a ZIP file before starting ingestion.");
+        return;
+      }
+      if (!selectedFile.name.toLowerCase().endsWith(".zip")) {
+        setError("Only .zip archives are supported.");
+        return;
+      }
+      if (selectedFile.size > maxZipBytes) {
+        setError(
+          `ZIP file exceeds the ${maxZipLabel} live upload limit. Remove generated folders such as node_modules, .git, dist, build, and cache directories before uploading.`,
+        );
+        return;
+      }
+    }
 
     try {
       if (ingestMode === "github") {
         await axios.post(`${import.meta.env.VITE_API_URL}/process-git`, {
-          repo_url: repoUrl,
+          repo_url: repoUrl.trim(),
           project_name: pendingProjectName,
         });
       } else {
-        if (!selectedFile) throw new Error("Please select a valid zip file.");
-        if (selectedFile.size > maxZipBytes) {
-          throw new Error(`ZIP file exceeds the ${maxZipLabel} upload limit.`);
-        }
         const formData = new FormData();
         formData.append("file", selectedFile);
         formData.append("project_name", pendingProjectName);
         await axios.post(
           `${import.meta.env.VITE_API_URL}/process-zip`,
           formData,
-          { headers: { "Content-Type": "multipart/form-data" } },
+          {
+            headers: { "Content-Type": "multipart/form-data" },
+            timeout: 10 * 60 * 1000,
+          },
         );
       }
 
+      setIsModalOpen(false);
       setRepoUrl("");
       setProjectName("");
       setSelectedFile(null);
 
-      // Start polling to track the new project's progress
       await fetchProjects();
       startPolling();
     } catch (err) {
-      setProjects((prev) => prev.filter((p) => p.name !== pendingProjectName));
       setIsModalOpen(true);
       setProjectName(pendingProjectName);
 

@@ -114,7 +114,4 @@ settings.create_required_directories()
 conn = sqlite3.connect(settings.SQLITE_DIR / "chat_history.db", check_same_thread=False)
 memory = SqliteSaver(conn)
 
-chat_graph_app = builder.compile(
-    checkpointer=memory,
-    interrupt_before=["debugger_tools"],
-)
+chat_graph_app = builder.compile(checkpointer=memory)

@@ -1,4 +1,5 @@
 import base64
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 import json
 import shutil
 import subprocess
@@ -48,6 +49,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(auth_router)
+
+_vision_executor = ThreadPoolExecutor(max_workers=2)
 
 
 class GitRepoPayload(BaseModel):
@@ -363,7 +366,24 @@ async def analyze_error_screenshot(
     await validate_image_upload(file)
     data = await file.read()
     image_b64 = base64.b64encode(data).decode("utf-8")
-    result, metadata = model_router.analyze_image(image_b64, file.content_type or "image/png", prompt)
+    future = _vision_executor.submit(model_router.analyze_image, image_b64, file.content_type or "image/png", prompt)
+    try:
+        timeout_seconds = max(5.0, settings.VISION_ANALYSIS_TIMEOUT_SECONDS)
+        if settings.is_production:
+            timeout_seconds = min(timeout_seconds, 35.0)
+        result, metadata = future.result(timeout=timeout_seconds)
+    except FutureTimeoutError:
+        result = (
+            "Vision analysis timed out before the provider returned a response. "
+            "Please paste the visible error text into chat so the debugger can continue with code retrieval."
+        )
+        metadata = {"provider": "none", "model": "timeout"}
+    except Exception as exc:
+        result = (
+            "Vision analysis failed before a provider response was available. "
+            f"Please paste the visible error text into chat. Error: {str(exc)[:200]}"
+        )
+        metadata = {"provider": "none", "model": "error"}
     return {"analysis": result, "provider": metadata}
 
 
