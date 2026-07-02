@@ -29,7 +29,6 @@ export default function Dashboard() {
   const [selectedFile, setSelectedFile] = useState(null);
   const [error, setError] = useState("");
 
-  // FIX: Use a ref to hold the interval so it's never recreated on projects state change
   const pollIntervalRef = useRef(null);
   const isPollingRef = useRef(false);
   const configuredMaxZipBytes = Number(import.meta.env.VITE_MAX_ZIP_BYTES || 1073741824);
@@ -67,7 +66,6 @@ export default function Dashboard() {
   }, []);
 
   const startPolling = useCallback(() => {
-    // FIX: Guard — never create more than one interval at a time
     if (isPollingRef.current) return;
     isPollingRef.current = true;
 
@@ -79,7 +77,6 @@ export default function Dashboard() {
         const fetched = response.data.projects || [];
         setProjects(fetched);
 
-        // Stop polling automatically once all projects are done
         const stillProcessing = fetched.some(
           (p) => p.status !== "ready" && p.status !== "error",
         );
@@ -89,11 +86,9 @@ export default function Dashboard() {
       } catch (err) {
         console.error("Polling error:", err);
       }
-    }, 60000); // Poll every 60 seconds during ingestion — prevents hammering the server while Ollama is running
+    }, 60000);
   }, [stopPolling]);
 
-  // On mount: fetch once, then start polling only if needed
-  // FIX: Named async function avoids react-hooks/set-state-in-effect ESLint warning
   useEffect(() => {
     async function initialize() {
       const fetched = await fetchProjects();
@@ -185,7 +180,6 @@ export default function Dashboard() {
       setProjectName("");
       setSelectedFile(null);
 
-      // Start polling to track the new project's progress
       await fetchProjects();
       startPolling();
     } catch (err) {

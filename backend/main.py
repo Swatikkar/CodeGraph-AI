@@ -368,7 +368,8 @@ async def analyze_error_screenshot(
     image_b64 = base64.b64encode(data).decode("utf-8")
     future = _vision_executor.submit(model_router.analyze_image, image_b64, file.content_type or "image/png", prompt)
     try:
-        result, metadata = future.result(timeout=settings.PROVIDER_TIMEOUT_SECONDS + 10)
+        timeout_seconds = max(settings.PROVIDER_TIMEOUT_SECONDS + 10, settings.VISION_ANALYSIS_TIMEOUT_SECONDS)
+        result, metadata = future.result(timeout=timeout_seconds)
     except FutureTimeoutError:
         result = (
             "Vision analysis timed out before the provider returned a response. "
