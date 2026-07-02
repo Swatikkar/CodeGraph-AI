@@ -90,7 +90,7 @@ class Settings(BaseSettings):
     )
     WEB_SEARCH_MAX_RESULTS: int = 3
     WEB_SEARCH_TIMEOUT_SECONDS: float = 8.0
-    VISION_ANALYSIS_TIMEOUT_SECONDS: float = 90.0
+    VISION_ANALYSIS_TIMEOUT_SECONDS: float = 35.0
 
     AUTH_PROVIDER: str = "local"
     JWT_SECRET_KEY: str = "fallback_secret_key"
