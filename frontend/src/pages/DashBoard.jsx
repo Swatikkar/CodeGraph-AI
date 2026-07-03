@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import axios from "axios";
+import JSZip from "jszip";
 import { useAuth } from "../context/AuthContext";
 import {
   FolderGit2,
@@ -15,6 +16,66 @@ import {
 } from "lucide-react";
 import { formatApiError } from "../utils/apiError";
 
+const IGNORED_UPLOAD_DIRS = new Set([
+  ".git",
+  ".hg",
+  ".svn",
+  ".cache",
+  ".pytest_cache",
+  ".mypy_cache",
+  ".ruff_cache",
+  ".tox",
+  ".venv",
+  "venv",
+  "env",
+  "agentenv",
+  "__pycache__",
+  "node_modules",
+  "dist",
+  "build",
+  ".next",
+  ".nuxt",
+  ".vite",
+  "coverage",
+  ".turbo",
+  ".parcel-cache",
+]);
+
+const IGNORED_UPLOAD_EXTENSIONS = [
+  ".pyc",
+  ".pyo",
+  ".sqlite",
+  ".sqlite3",
+  ".db",
+  ".log",
+  ".zip",
+  ".7z",
+  ".rar",
+  ".tar",
+  ".gz",
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".gif",
+  ".webp",
+  ".mp4",
+  ".mov",
+  ".avi",
+  ".exe",
+  ".dll",
+  ".so",
+  ".dylib",
+];
+
+function shouldSkipZipEntry(entryName) {
+  const normalized = entryName.replace(/\\/g, "/");
+  const parts = normalized.split("/").filter(Boolean);
+  if (parts.some((part) => IGNORED_UPLOAD_DIRS.has(part))) return true;
+  const filename = parts[parts.length - 1] || "";
+  const lower = filename.toLowerCase();
+  return IGNORED_UPLOAD_EXTENSIONS.some((ext) => lower.endsWith(ext));
+}
+
 export default function Dashboard() {
   const { user } = useAuth();
   const navigate = useNavigate();
@@ -28,10 +89,14 @@ export default function Dashboard() {
   const [repoUrl, setRepoUrl] = useState("");
   const [selectedFile, setSelectedFile] = useState(null);
   const [error, setError] = useState("");
+  const [isPreparingUpload, setIsPreparingUpload] = useState(false);
 
   const pollIntervalRef = useRef(null);
   const isPollingRef = useRef(false);
   const configuredMaxZipBytes = Number(import.meta.env.VITE_MAX_ZIP_BYTES || 1073741824);
+  const hostedZipTargetBytes = Number(
+    import.meta.env.VITE_HOSTED_ZIP_TARGET_BYTES || 80 * 1024 * 1024,
+  );
   const maxZipBytes = configuredMaxZipBytes;
   const maxZipLabel =
     maxZipBytes >= 1024 * 1024 * 1024
@@ -39,6 +104,35 @@ export default function Dashboard() {
       : `${Math.round(maxZipBytes / 1024 / 1024)} MB`;
 
   const displayName = user?.email ? user.email.split("@")[0] : "Developer";
+
+  const prepareZipForUpload = async (file) => {
+    if (file.size <= hostedZipTargetBytes) return file;
+
+    setIsPreparingUpload(true);
+    const sourceZip = await JSZip.loadAsync(file);
+    const preparedZip = new JSZip();
+    let keptFiles = 0;
+
+    const entries = Object.values(sourceZip.files);
+    for (const entry of entries) {
+      if (entry.dir || shouldSkipZipEntry(entry.name)) continue;
+      const content = await entry.async("uint8array");
+      preparedZip.file(entry.name, content);
+      keptFiles += 1;
+    }
+
+    if (!keptFiles) {
+      throw new Error("The ZIP did not contain supported source files after filtering generated folders.");
+    }
+
+    const blob = await preparedZip.generateAsync({
+      type: "blob",
+      compression: "DEFLATE",
+      compressionOptions: { level: 6 },
+    });
+
+    return new File([blob], file.name, { type: "application/zip" });
+  };
 
   const fetchProjects = useCallback(async () => {
     try {
@@ -161,8 +255,16 @@ export default function Dashboard() {
           project_name: pendingProjectName,
         });
       } else {
+        const uploadFile = await prepareZipForUpload(selectedFile);
+        if (uploadFile.size > maxZipBytes) {
+          setError(
+            `ZIP file exceeds the ${maxZipLabel} upload limit after removing generated folders. Please use GitHub URL ingestion or reduce the archive size.`,
+          );
+          return;
+        }
+
         const formData = new FormData();
-        formData.append("file", selectedFile);
+        formData.append("file", uploadFile);
         formData.append("project_name", pendingProjectName);
         await axios.post(
           `${import.meta.env.VITE_API_URL}/process-zip`,
@@ -186,6 +288,8 @@ export default function Dashboard() {
       setProjectName(pendingProjectName);
 
       setError(formatApiError(err, "Failed to ingest project. Please try again."));
+    } finally {
+      setIsPreparingUpload(false);
     }
   };
 
@@ -403,9 +507,17 @@ export default function Dashboard() {
                   </button>
                   <button
                     type="submit"
-                    className="flex items-center gap-2 bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-semibold px-6 py-2 rounded-lg transition-all disabled:opacity-50"
+                    disabled={isPreparingUpload}
+                    className="flex items-center gap-2 bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-semibold px-6 py-2 rounded-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    Start Ingestion
+                    {isPreparingUpload ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        Preparing ZIP
+                      </>
+                    ) : (
+                      "Start Ingestion"
+                    )}
                   </button>
                 </div>
               </form>
