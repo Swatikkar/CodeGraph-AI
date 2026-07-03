@@ -116,6 +116,7 @@ def architect_node(state: dict):
     architecture_path(user_id, project_name).write_text(architecture, encoding="utf-8")
 
     report = {
+        "scanned_files": state.get("scanned_files", len(processed_files)),
         "processed_files": len(processed_files),
         "dependency_edges": sum(len(v) for v in dependency_map.values()),
         "architecture_model": metadata,

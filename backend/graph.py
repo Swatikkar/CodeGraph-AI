@@ -1,3 +1,4 @@
+import json
 from typing import List, TypedDict
 
 from langgraph.graph import END, StateGraph
@@ -6,7 +7,7 @@ from agents.architect import architect_node
 from agents.commenter import commenter_node
 from tools.ingester import ingest_to_chroma
 from tools.scanner import get_codebase_map
-from utils.storage import project_namespace, write_status
+from utils.storage import ingestion_report_path, project_namespace, write_status
 
 
 class GraphState(TypedDict):
@@ -16,7 +17,28 @@ class GraphState(TypedDict):
     unprocessed_files: List[str]
     processed_files: List[str]
     comment_report: list
+    scanned_files: int
     errors: List[str]
+
+
+def write_ingestion_report(state: GraphState, **extra):
+    report_path = ingestion_report_path(state["user_id"], state["project_name"])
+    existing = {}
+    if report_path.exists():
+        try:
+            existing = json.loads(report_path.read_text(encoding="utf-8"))
+        except Exception:
+            existing = {}
+    payload = {
+        **existing,
+        "scanned_files": state.get("scanned_files", existing.get("scanned_files", 0)),
+        "processed_files": len(state.get("processed_files", [])),
+        "remaining_files": len(state.get("unprocessed_files", [])),
+        "comment_report": state.get("comment_report", []),
+        **extra,
+    }
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 def scanner_node(state: GraphState):
@@ -27,10 +49,22 @@ def scanner_node(state: GraphState):
             user_id=state["user_id"],
             project_name=state["project_name"],
         )
+        scanned_files = scan_result["total_files"]
+        print(
+            f"[ingestion] scanned {scanned_files} files for "
+            f"{state['user_id']}/{state['project_name']}",
+            flush=True,
+        )
+        write_ingestion_report(
+            {**state, "scanned_files": scanned_files},
+            scanned_file_paths=scan_result["files_to_process"],
+            stage="scan",
+        )
         return {
             "unprocessed_files": scan_result["files_to_process"],
             "processed_files": [],
             "comment_report": [],
+            "scanned_files": scanned_files,
             "errors": [],
         }
     except Exception as exc:
@@ -50,7 +84,9 @@ def wrapped_commenter_node(state: GraphState):
         f"Commenting files ({processed}/{total})...",
         progress,
     )
-    return commenter_node(state)
+    result = commenter_node(state)
+    write_ingestion_report({**state, **result}, stage="comment")
+    return result
 
 
 def wrapped_architect_node(state: GraphState):
@@ -63,12 +99,15 @@ def ingestion_node(state: GraphState):
     isolated_name = project_namespace(state["user_id"], state["project_name"])
     processed = state.get("processed_files", [])
     if processed:
-        ingest_to_chroma(
+        embedded_chunks = ingest_to_chroma(
             processed,
             isolated_name,
             project_root=state["project_path"],
             user_id=state["user_id"],
         )
+    else:
+        embedded_chunks = 0
+    write_ingestion_report(state, stage="embed", embedded_chunks=embedded_chunks)
     write_status(state["user_id"], state["project_name"], "ready", "complete", "Project is ready for chat.", 100)
     return state
 

@@ -1,10 +1,10 @@
 export function formatApiError(error, fallback = "Something went wrong.") {
   if (error?.code === "ECONNABORTED") {
-    return "The request timed out before the server responded. Try a smaller ZIP or retry when the backend is awake.";
+    return "The request timed out before the server responded. Check that the backend is running and try again.";
   }
 
   if (error?.message === "Network Error" && !error?.response) {
-    return "Network error while contacting the backend. This usually happens when the upload is too large for the live demo host, the backend is waking up, or the connection was interrupted.";
+    return "Network error while contacting the backend. Check that the backend is running and VITE_API_URL points to the correct API URL.";
   }
 
   const detail = error?.response?.data?.detail ?? error?.message;
