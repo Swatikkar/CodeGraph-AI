@@ -8,7 +8,7 @@ import numpy as np
 from langchain_chroma import Chroma
 from langchain_core.tools import tool
 
-from config import settings
+from config import IGNORE_DIRS, settings
 from providers import model_router
 from utils.chroma import ensure_chroma_defaults
 from utils.secrets import redact_secrets
@@ -129,7 +129,7 @@ def filesystem_retrieve(query: str, project_name: str, top_n: int = 5) -> str:
     for path in root.rglob("*"):
         if not path.is_file() or path.suffix.lower() not in allowed_suffixes:
             continue
-        if any(part in settings.IGNORE_DIRS for part in path.parts):
+        if any(part in IGNORE_DIRS for part in path.parts):
             continue
         try:
             content = path.read_text(encoding="utf-8", errors="replace")
