@@ -25,31 +25,33 @@ Live demo:
 
 ## Demo Walkthrough
 
-### 1. Dashboard
+### 1. Sign Up
 
-After login, each user sees only their own projects. The screenshots below use a cleaned LogisticAI React project and a second `debugger_test` variant with an injected runtime bug.
+Users can create an account with a valid email address. Passwords must be 8 to 128 characters, and the password field includes an eye icon for optional visibility.
+
+![Signup page with email and hidden password field](assets/screenshots/signup.png)
+
+### 2. Dashboard
+
+After login, each user sees only their own projects.
 
 ![Dashboard showing LogisticAI test projects](assets/screenshots/dashboard.png)
 
-### 2. ZIP Upload
+### 3. Project Ingestion
 
-The hosted demo validates ZIP files before upload. For the free live app, the frontend caps ZIP upload at 95 MB to avoid Render/Vercel gateway failures. The original LogisticAI ZIP contained generated folders and cache data, so the test ZIP was cleaned before upload.
+CodeGraph AI supports both public Git repository ingestion and local ZIP upload. During scanning, generated folders such as `node_modules`, `.git`, build output, and cache folders are skipped before indexing.
+
+![GitHub URL ingestion option](assets/screenshots/git-url-ingestion.png)
 
 ![ZIP upload modal with sample_project.zip selected](assets/screenshots/upload-zip.png)
 
-Recommended before upload:
-
-- Remove `node_modules`, `.git`, `.cache`, `dist`, `build`, `.next`, and coverage folders.
-- Keep source files, package manifests, and small documentation files.
-- Use clear project names such as `sample_project`, `debugger_test`, or the real repository name.
-
-### 3. Retrieval-backed Chat
+### 4. Retrieval-backed Chat
 
 The agent retrieves relevant chunks from the ingested codebase and returns cited source files in the right panel.
 
 ![Chat answer with response time and referenced files](assets/screenshots/chat-references.png)
 
-### 4. Architecture And Links
+### 5. Architecture And Links
 
 CodeGraph AI generates diagram artifacts during ingestion. The workspace exposes the architecture view and dependency/link graph in the right sidebar.
 
@@ -57,36 +59,33 @@ CodeGraph AI generates diagram artifacts during ingestion. The workspace exposes
 
 ![Dependency links graph proof](assets/screenshots/links.png)
 
-### 5. Debugger Routing
+### 6. Debugger Routing And HITL
 
-For an error-style query, the supervisor routes the task to debugger behavior. The debugger retrieves project context, identifies the injected `calculateDeliveryEta` issue, and proposes a safe fix.
+For an error-style query, the Supervisor Agent routes the task to the Debugger Agent. The debugger retrieves project context, identifies the `calculateDeliveryEta` issue, and proposes a safe fix.
 
-![Debugger response for injected LogisticAI runtime bug](assets/screenshots/debugger-response.png)
+![Debugger response for LogisticAI runtime bug](assets/screenshots/debugger-response.png)
 
-Terminal evidence from the live backend SSE stream:
+The patch is not written automatically. The Patch tab shows the target file and proposed replacement, then waits for explicit approval.
 
-![Debugger tool routing terminal proof](assets/screenshots/debugger-tools.png)
+![Human approval patch review](assets/screenshots/hitl-patch-approval.png)
 
-### 6. Provider Fallback
+Backend terminal evidence shows the supervisor-to-debugger route and debugger tool calls.
 
-The model router is role-based. In this proof, the first Groq route is intentionally invalid, so the router records the failure and switches to Gemini successfully without exposing API keys.
+![Debugger routing backend terminal proof](assets/screenshots/debugger-tools.png)
+
+### 7. Provider Fallback
+
+The model router is role-based. If one provider/model is unavailable or quota-limited, the router records the failed attempt and switches to the next configured provider without exposing API keys.
 
 ![Provider fallback terminal proof](assets/screenshots/provider-switch.png)
 
-### 7. Vision Handling
+### 8. Vision Handling
 
-The vision model was tested locally against a LogisticAI error screenshot and correctly identified:
+Users can attach an error screenshot in chat. The vision endpoint reads the screenshot, extracts the visible error context, and the debugger can continue with code retrieval for the same project.
 
-- error: `Cannot read properties of undefined (reading 'distanceKm')`
-- failing function: `calculateDeliveryEta`
-- likely file: `src/App.js`
-- dependent caller to inspect: `src/Components/Map.js`
+![Vision screenshot analysis proof](assets/screenshots/vision-debugger.png)
 
-On Render free tier, slow live vision calls are capped so they return a controlled timeout message instead of a 502/network failure.
-
-![Vision model and hosted fallback proof](assets/screenshots/vision-debugger.png)
-
-### 8. Guardrails
+### 9. Guardrails
 
 Unsafe prompts are blocked before model/tool execution.
 
@@ -285,7 +284,7 @@ Recommended flow:
 - Provider/model/tool traces are not shown in normal frontend chat output.
 - Provider fallback switches to the next configured route when a provider/model fails.
 - Debugger retrieves relevant code for runtime-error prompts.
-- Vision model reads error screenshots locally; hosted Render calls fail closed if the provider is too slow.
+- Vision model reads error screenshots.
 - Secret-exfiltration prompts are blocked.
 - Project deletion removes generated workspace data when cleanup succeeds.
 
@@ -294,7 +293,7 @@ Recommended flow:
 - Render free storage is ephemeral. Use persistent disk/object storage/vector DB for production.
 - Render free services may sleep or restart, which clears uploaded projects and vector data.
 - Very large repositories may exceed scan/provider limits.
-- Live vision calls may time out on free Render; the endpoint returns a controlled fallback instead of a 502.
+- Vision analysis depends on provider availability and response latency.
 - Architecture quality depends on project size, file types, and provider availability.
 
 ## Why This Project Matters

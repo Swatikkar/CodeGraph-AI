@@ -61,6 +61,8 @@ def route_supervisor(state: ChatState) -> Literal["supervisor_tools", "debugger"
     messages = state.get("messages", [])
     last_message = messages[-1]
     if getattr(last_message, "tool_calls", None):
+        tool_names = ", ".join(tool_call.get("name", "tool") for tool_call in getattr(last_message, "tool_calls", []))
+        print(f"[agent-router] Supervisor selected retrieval/tools: {tool_names}", flush=True)
         tool_messages = [message for message in messages if getattr(message, "type", None) == "tool"]
         if len(tool_messages) >= 2:
             return "__end__"
@@ -79,6 +81,7 @@ def route_supervisor(state: ChatState) -> Literal["supervisor_tools", "debugger"
             return "__end__"
         return "supervisor_tools"
     if "ROUTE_TO_DEBUGGER" in str(last_message.content):
+        print("[agent-router] Supervisor routed query to Debugger Agent", flush=True)
         return "debugger"
     return "__end__"
 
@@ -87,6 +90,8 @@ def route_debugger(state: ChatState) -> Literal["debugger_tools", "__end__"]:
     messages = state.get("messages", [])
     last_message = messages[-1]
     if getattr(last_message, "tool_calls", None):
+        tool_names = ", ".join(tool_call.get("name", "tool") for tool_call in getattr(last_message, "tool_calls", []))
+        print(f"[agent-router] Debugger selected tools: {tool_names}", flush=True)
         return "debugger_tools"
     return "__end__"
 

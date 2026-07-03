@@ -1,4 +1,5 @@
 import base64
+import ast
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 import json
 import shutil
@@ -69,6 +70,21 @@ class ChatPayload(BaseModel):
 
 def sse_event(event_type: str, **payload) -> str:
     return f"data: {json.dumps({'type': event_type, **payload})}\n\n"
+
+
+def normalize_ai_content(raw_content) -> str:
+    if isinstance(raw_content, list):
+        return "".join(item.get("text", "") for item in raw_content if isinstance(item, dict))
+
+    text = str(raw_content)
+    if text.startswith("[{") and "'type': 'text'" in text and "'extras':" in text:
+        try:
+            parsed = ast.literal_eval(text)
+            if isinstance(parsed, list):
+                return "".join(item.get("text", "") for item in parsed if isinstance(item, dict))
+        except (SyntaxError, ValueError):
+            return ""
+    return text
 
 
 def run_pipeline_in_background(user_id: str, project_name: str):
@@ -291,9 +307,26 @@ async def handle_chat_interaction(payload: ChatPayload, current_user=Depends(get
             accumulated = ""
             for chunk, _metadata in chat_graph_app.stream(input_data, config=config, stream_mode="messages"):
                 if getattr(chunk, "tool_calls", None):
+                    graph_node = (_metadata or {}).get("langgraph_node", "")
+                    tool_owner = "Debugger" if "debugger" in graph_node else "Supervisor"
                     for tool_call in chunk.tool_calls:
-                        print(f"[tool-call] start {tool_call.get('name', 'tool')} args={tool_call.get('args', {})}", flush=True)
-                        yield sse_event("tool_start", tool=tool_call.get("name", "tool"), args=tool_call.get("args", {}))
+                        tool_name = tool_call.get("name", "tool")
+                        tool_args = tool_call.get("args", {})
+                        if tool_name == "retrieve_code_context":
+                            print(f"[agent-tools] {tool_owner} called retrieve_code_context", flush=True)
+                        elif tool_name == "read_project_file":
+                            print(f"[agent-tools] {tool_owner} called read_project_file", flush=True)
+                        elif tool_name == "propose_patch":
+                            print(f"[agent-tools] {tool_owner} prepared patch proposal", flush=True)
+                            yield sse_event(
+                                "patch_preview",
+                                file_path=tool_args.get("file_path", ""),
+                                new_content=tool_args.get("new_content", ""),
+                                summary="Review the proposed file replacement before approving the write.",
+                            )
+                        else:
+                            print(f"[tool-call] start {tool_name} args={tool_args}", flush=True)
+                        yield sse_event("tool_start", tool=tool_name, args=tool_args)
                     continue
 
                 if chunk.type == "tool":
@@ -308,10 +341,9 @@ async def handle_chat_interaction(payload: ChatPayload, current_user=Depends(get
                     continue
 
                 if chunk.type == "ai" and chunk.content:
-                    content = chunk.content
-                    if isinstance(content, list):
-                        content = "".join(item.get("text", "") for item in content if isinstance(item, dict))
-                    content = str(content)
+                    content = normalize_ai_content(chunk.content)
+                    if "ROUTE_TO_DEBUGGER" in content:
+                        continue
                     if re_search_tool_leak(content):
                         continue
                     accumulated += content
@@ -329,7 +361,7 @@ async def handle_chat_interaction(payload: ChatPayload, current_user=Depends(get
             if state and state.values and "messages" in state.values:
                 for message in reversed(state.values["messages"]):
                     if getattr(message, "type", None) == "ai" and getattr(message, "content", None):
-                        final_content = str(message.content)
+                        final_content = normalize_ai_content(message.content)
                         if "ROUTE_TO_DEBUGGER" not in final_content and final_content not in accumulated:
                             accumulated += final_content
                             yield sse_event("chunk", content=final_content)
@@ -364,6 +396,8 @@ async def analyze_error_screenshot(
     current_user=Depends(get_current_user),
 ):
     await validate_image_upload(file)
+    slug = slugify_project_name(project_name)
+    print(f"[vision] Vision analysis requested for screenshot in project '{slug}'", flush=True)
     data = await file.read()
     image_b64 = base64.b64encode(data).decode("utf-8")
     future = _vision_executor.submit(model_router.analyze_image, image_b64, file.content_type or "image/png", prompt)

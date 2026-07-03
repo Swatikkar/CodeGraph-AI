@@ -1,6 +1,6 @@
 import re
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from providers import model_router
 from tools.file_ops import get_project_tree
@@ -51,12 +51,20 @@ def supervisor_node(state: dict) -> dict:
         "import changed", "new method", "new api", "library",
     ]
     direct_markers = ["reply with exactly", "say exactly", "stream ok"]
+    debugger_markers = [
+        "debug", "fix", "runtime error", "traceback", "stack trace", "exception",
+        "cannot read properties", "undefined", "crash", "failing", "broken",
+    ]
     should_use_retrieval = last_human and any(marker in prompt for marker in code_markers)
     should_use_search = last_human and any(marker in prompt for marker in external_markers)
     is_direct_prompt = (
         any(marker in prompt for marker in direct_markers)
         or prompt.strip() in {"hello", "hi", "hey"}
     )
+    if last_human and not is_direct_prompt and any(marker in prompt for marker in debugger_markers):
+        print("[agent-router] Supervisor routed query to Debugger Agent", flush=True)
+        return {"messages": [AIMessage(content="ROUTE_TO_DEBUGGER")], "provider_events": []}
+
     should_use_tools = (should_use_retrieval or should_use_search) and not is_direct_prompt
     has_tool_results = any(getattr(message, "type", None) == "tool" for message in messages)
 

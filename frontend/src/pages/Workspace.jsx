@@ -124,6 +124,9 @@ export default function Workspace() {
   const [chatInput, setChatInput] = useState("");
   const [imageFile, setImageFile] = useState(null);
   const [isChatting, setIsChatting] = useState(false);
+  const [patchPreview, setPatchPreview] = useState(null);
+  const [patchStatus, setPatchStatus] = useState("");
+  const [isApprovingPatch, setIsApprovingPatch] = useState(false);
   const [loadingFile, setLoadingFile] = useState(false);
   const chatEndRef = useRef(null);
   const sseBuffer = useRef("");
@@ -200,6 +203,7 @@ export default function Workspace() {
     setChatInput("");
     setIsChatting(true);
     setReferences([]);
+    setPatchStatus("");
     sseBuffer.current = "";
 
     const botIndex = chatMessages.length + 1;
@@ -254,6 +258,14 @@ export default function Workspace() {
           } else if (data.type === "reference") {
             setReferences((prev) => [...new Set([...prev, data.path])]);
             setRightTab("references");
+          } else if (data.type === "patch_preview") {
+            setPatchPreview({
+              filePath: data.file_path,
+              newContent: data.new_content,
+              summary: data.summary,
+            });
+            setPatchStatus("Patch proposal is ready for review.");
+            setRightTab("patch");
           } else if (data.type === "approval_required") {
             accumulated += `\n\n${data.content}`;
             updateBotMessage(botIndex, accumulated);
@@ -268,6 +280,56 @@ export default function Workspace() {
       updateBotMessage(botIndex, `Connection error: ${error.message}`);
     } finally {
       setIsChatting(false);
+    }
+  };
+
+  const handleApprovePatch = async () => {
+    if (!patchPreview || isApprovingPatch) return;
+    setIsApprovingPatch(true);
+    setPatchStatus("Applying approved patch...");
+    try {
+      const response = await fetch(`${import.meta.env.VITE_API_URL}/chat`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${localStorage.getItem("token")}`,
+        },
+        body: JSON.stringify({
+          project_name: projectName,
+          query: "Approve proposed patch.",
+          thread_id: projectName,
+          is_approval: true,
+          approval_file_path: patchPreview.filePath,
+          approval_new_content: patchPreview.newContent,
+        }),
+      });
+      if (!response.ok) throw new Error(`HTTP error: ${response.status}`);
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder("utf-8");
+      let buffer = "";
+      let statusMessage = "Patch approved and applied.";
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split("\n\n");
+        buffer = parts.pop() ?? "";
+        for (const part of parts) {
+          const line = part.trim();
+          if (!line.startsWith("data: ")) continue;
+          const data = JSON.parse(line.slice(6));
+          if (data.type === "tool_result" && data.content) statusMessage = data.content;
+          if (data.type === "error" && data.content) statusMessage = data.content;
+        }
+      }
+      setPatchStatus(statusMessage);
+      if (patchPreview.filePath === activeFile.path) {
+        await handleFileSelect(activeFile.path, activeFile.name);
+      }
+    } catch (error) {
+      setPatchStatus(`Patch approval failed: ${error.message}`);
+    } finally {
+      setIsApprovingPatch(false);
     }
   };
 
@@ -396,8 +458,38 @@ export default function Workspace() {
           {rightTab === "architecture" && <DiagramView projectName={projectName} mode="architecture" />}
           {rightTab === "links" && <DiagramView projectName={projectName} mode="dependency" />}
           {rightTab === "patch" && (
-            <div className="p-4 text-sm text-zinc-500">
-              Patch previews and approval controls will appear here when the debugger proposes a change.
+            <div className="space-y-4 p-4 text-sm">
+              {patchPreview ? (
+                <>
+                  <div>
+                    <h3 className="text-sm font-semibold text-zinc-200">Patch review</h3>
+                    <p className="mt-1 text-xs text-zinc-500">{patchPreview.summary}</p>
+                  </div>
+                  <div className="rounded border border-zinc-800 bg-zinc-950">
+                    <div className="border-b border-zinc-800 px-3 py-2 text-xs font-medium text-emerald-300">
+                      {patchPreview.filePath}
+                    </div>
+                    <pre className="max-h-[32rem] overflow-auto p-3 text-xs leading-relaxed text-zinc-300"><code>{patchPreview.newContent}</code></pre>
+                  </div>
+                  {patchStatus && (
+                    <div className="rounded border border-zinc-800 bg-zinc-900 px-3 py-2 text-xs text-zinc-300">
+                      {patchStatus}
+                    </div>
+                  )}
+                  <button
+                    type="button"
+                    onClick={handleApprovePatch}
+                    disabled={isApprovingPatch || !patchPreview.newContent}
+                    className="w-full rounded bg-emerald-500 px-3 py-2 text-sm font-semibold text-zinc-950 hover:bg-emerald-400 disabled:opacity-50"
+                  >
+                    {isApprovingPatch ? "Applying patch..." : "Approve patch"}
+                  </button>
+                </>
+              ) : (
+                <div className="flex h-full items-center justify-center p-6 text-center text-sm text-zinc-600">
+                  Patch previews and approval controls will appear here when the debugger proposes a change.
+                </div>
+              )}
             </div>
           )}
         </div>
