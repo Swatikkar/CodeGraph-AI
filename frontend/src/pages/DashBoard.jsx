@@ -32,8 +32,7 @@ export default function Dashboard() {
   const pollIntervalRef = useRef(null);
   const isPollingRef = useRef(false);
   const configuredMaxZipBytes = Number(import.meta.env.VITE_MAX_ZIP_BYTES || 1073741824);
-  const liveDemoMaxZipBytes = import.meta.env.PROD ? 95 * 1024 * 1024 : Number.POSITIVE_INFINITY;
-  const maxZipBytes = Math.min(configuredMaxZipBytes, liveDemoMaxZipBytes);
+  const maxZipBytes = configuredMaxZipBytes;
   const maxZipLabel =
     maxZipBytes >= 1024 * 1024 * 1024
       ? `${Math.round(maxZipBytes / 1024 / 1024 / 1024)} GB`
@@ -149,7 +148,7 @@ export default function Dashboard() {
       }
       if (selectedFile.size > maxZipBytes) {
         setError(
-          `ZIP file exceeds the ${maxZipLabel} live upload limit. Remove generated folders such as node_modules, .git, dist, build, and cache directories before uploading.`,
+          `ZIP file exceeds the ${maxZipLabel} upload limit. Remove generated folders such as node_modules, .git, dist, build, and cache directories before uploading.`,
         );
         return;
       }

@@ -96,9 +96,11 @@ def run_pipeline_in_background(user_id: str, project_name: str):
             "unprocessed_files": [],
             "processed_files": [],
             "comment_report": [],
+            "scanned_files": 0,
             "errors": [],
         }
-        codegraph_app.invoke(state)
+        recursion_limit = max(50, settings.MAX_PROJECT_FILES + 10)
+        codegraph_app.invoke(state, config={"recursion_limit": recursion_limit})
     except Exception as exc:
         write_status(user_id, project_name, "error", "pipeline", "Background analysis failed.", 0, str(exc))
 
