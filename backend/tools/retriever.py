@@ -12,6 +12,7 @@ from config import settings
 from providers import model_router
 from utils.chroma import ensure_chroma_defaults
 from utils.secrets import redact_secrets
+from utils.storage import project_root
 
 
 _vectorstore_cache: dict[str, Chroma] = {}
@@ -112,6 +113,47 @@ def hybrid_retrieve(query: str, project_name: str, top_n: int = 5) -> str:
     return "\n".join(context)
 
 
+def filesystem_retrieve(query: str, project_name: str, top_n: int = 5) -> str:
+    try:
+        user_id, slug = project_name.split("_", 1)
+    except ValueError:
+        return "Error: Project namespace is invalid."
+
+    root = project_root(user_id, slug)
+    if not root.exists():
+        return "Error: Project files are not available."
+
+    query_tokens = clean_tokens(query)
+    scored_files = []
+    allowed_suffixes = {".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".go", ".rb", ".rs", ".php", ".cs"}
+    for path in root.rglob("*"):
+        if not path.is_file() or path.suffix.lower() not in allowed_suffixes:
+            continue
+        if any(part in settings.IGNORE_DIRS for part in path.parts):
+            continue
+        try:
+            content = path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        lower_content = content.lower()
+        rel_path = path.relative_to(root).as_posix()
+        score = sum(1 for token in query_tokens if token in lower_content or token in rel_path.lower())
+        if score:
+            scored_files.append((score, rel_path, content))
+
+    scored_files.sort(key=lambda item: item[0], reverse=True)
+    if not scored_files:
+        return "No relevant code found in project files."
+
+    context = []
+    for idx, (_score, rel_path, content) in enumerate(scored_files[:top_n], start=1):
+        context.append(
+            f"\n--- Context Block {idx} (File: {rel_path}, Language: {Path(rel_path).suffix.lower().lstrip('.') or 'code'}) ---\n"
+            f"{redact_secrets(content[:settings.MAX_FILE_BYTES])}\n"
+        )
+    return "\n".join(context)
+
+
 @tool
 def retrieve_code_context(query: str, project_name: str, top_n: int = 5) -> str:
     """
@@ -122,12 +164,16 @@ def retrieve_code_context(query: str, project_name: str, top_n: int = 5) -> str:
     if not project_db_path.exists():
         return "Error: Vector database not found. Has this project been ingested?"
 
-    embeddings = model_router.embeddings()
-    query_embedding = np.array(embeddings.embed_query(query))
-    cached = check_semantic_cache(query_embedding, project_name)
-    if cached is not None:
-        return cached
+    try:
+        embeddings = model_router.embeddings()
+        query_embedding = np.array(embeddings.embed_query(query))
+        cached = check_semantic_cache(query_embedding, project_name)
+        if cached is not None:
+            return cached
 
-    result = hybrid_retrieve(query, project_name, top_n)
-    store_in_cache(query_embedding, result, project_name)
-    return result
+        result = hybrid_retrieve(query, project_name, top_n)
+        store_in_cache(query_embedding, result, project_name)
+        return result
+    except Exception as exc:
+        print(f"[retrieval] Chroma retrieval unavailable, using filesystem fallback: {exc}", flush=True)
+        return filesystem_retrieve(query, project_name, top_n)

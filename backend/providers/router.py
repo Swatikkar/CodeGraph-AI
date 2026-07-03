@@ -152,7 +152,7 @@ class ModelRouter:
                 llm = self.llm_for_route(route, tools=tools)
                 response = llm.invoke(messages)
                 elapsed = round(time.perf_counter() - started_at, 2)
-                _log_provider(f"{role}: success {route.label} in {elapsed}s")
+                _log_provider(f"Provider selected successfully for {role}: {route.label} in {elapsed}s")
                 metadata = {
                     "provider": route.provider,
                     "model": route.model,
@@ -163,7 +163,8 @@ class ModelRouter:
             except Exception as exc:
                 elapsed = round(time.perf_counter() - started_at, 2)
                 error = _short_error(exc)
-                _log_provider(f"{role}: failed {route.label} after {elapsed}s: {error}")
+                _log_provider(f"Provider failed/unavailable for {role}: {route.label} after {elapsed}s: {error}")
+                _log_provider(f"Trying next provider for {role}")
                 errors.append({
                     "provider": route.provider,
                     "model": route.model,
