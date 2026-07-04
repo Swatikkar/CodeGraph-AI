@@ -126,7 +126,7 @@ class Settings(BaseSettings):
 
     @property
     def use_supabase_storage(self) -> bool:
-        return self.STORAGE_MODE.lower() == "supabase"
+        return self.STORAGE_MODE.lower() == "supabase" or (self.is_production and bool(self.DATABASE_URL))
 
     @property
     def resolved_database_url(self) -> str:
