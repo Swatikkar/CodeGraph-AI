@@ -174,12 +174,14 @@ def upsert_artifact(db: Session, project: ProjectModel, artifact_type: str, cont
     record.content = content
 
 
-def replace_project_chunks(db: Session, project: ProjectModel, files: list[tuple[str, str]]) -> None:
+def replace_project_chunks(db: Session, project: ProjectModel, files: list[tuple[str, str]]) -> int:
     db.query(ProjectChunkModel).filter(ProjectChunkModel.project_id == project.id).delete()
+    chunk_count = 0
     for rel_path, content in files:
         doc = Document(page_content=redact_secrets(content), metadata={"relative_path": rel_path})
         splitter = get_splitter_for_file(rel_path)
         for idx, chunk in enumerate(splitter.split_documents([doc])):
+            chunk_count += 1
             db.add(
                 ProjectChunkModel(
                     project_id=project.id,
@@ -190,6 +192,7 @@ def replace_project_chunks(db: Session, project: ProjectModel, files: list[tuple
                     embedding=None,
                 )
             )
+    return chunk_count
 
 
 def persist_project_snapshot(user_id: int | str, slug: str) -> None:
@@ -198,9 +201,11 @@ def persist_project_snapshot(user_id: int | str, slug: str) -> None:
 
     db = SessionLocal()
     try:
+        print(f"[persistence] snapshot start user={user_id} slug={slug}", flush=True)
         project = require_project(db, user_id, slug)
         root = project_root(user_id, slug)
         if not root.exists():
+            print(f"[persistence] snapshot skipped missing root user={user_id} slug={slug}", flush=True)
             return
 
         files = list(iter_persistable_files(root))
@@ -214,8 +219,14 @@ def persist_project_snapshot(user_id: int | str, slug: str) -> None:
             if path.exists() and path.is_file():
                 upsert_artifact(db, project, artifact_type, path.read_text(encoding="utf-8", errors="replace"))
 
-        replace_project_chunks(db, project, files)
+        artifact_count = db.query(ProjectArtifactModel).filter(ProjectArtifactModel.project_id == project.id).count()
+        chunk_count = replace_project_chunks(db, project, files)
         db.commit()
+        print(
+            f"[persistence] snapshot complete user={user_id} slug={slug} "
+            f"files={len(files)} artifacts={artifact_count} chunks={chunk_count}",
+            flush=True,
+        )
     finally:
         db.close()
 

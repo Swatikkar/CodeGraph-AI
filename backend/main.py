@@ -137,7 +137,14 @@ def safe_extract_zip(zip_path: Path, destination: Path):
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "app": settings.APP_NAME, "environment": settings.ENVIRONMENT}
+    return {
+        "status": "ok",
+        "app": settings.APP_NAME,
+        "environment": settings.ENVIRONMENT,
+        "storage_mode": settings.STORAGE_MODE,
+        "supabase_storage_enabled": settings.use_supabase_storage,
+        "database_configured": bool(settings.DATABASE_URL),
+    }
 
 
 @app.post("/api/process-zip")
@@ -151,17 +158,25 @@ async def process_zip_upload(
     await validate_zip_upload(file)
     slug = slugify_project_name(project_name)
     if storage_enabled():
-        upsert_project(
-            db,
-            current_user.id,
-            slug,
-            project_name.strip(),
-            "zip",
-            status="processing",
-            stage="upload",
-            message=f"Project '{slug}' upload started.",
-            progress=1,
-        )
+        try:
+            project = upsert_project(
+                db,
+                current_user.id,
+                slug,
+                project_name.strip(),
+                "zip",
+                status="processing",
+                stage="upload",
+                message=f"Project '{slug}' upload started.",
+                progress=1,
+            )
+            print(
+                f"[persistence] project row ready id={project.id} user={current_user.id} slug={slug} source=zip",
+                flush=True,
+            )
+        except Exception as exc:
+            print(f"[persistence] failed to create project row user={current_user.id} slug={slug}: {exc}", flush=True)
+            raise HTTPException(status_code=500, detail="Failed to create durable project record.") from exc
     ensure_project_dirs(current_user.id, slug)
     root = project_root(current_user.id, slug)
     zip_path = user_upload_root(current_user.id) / f"{slug}.zip"
@@ -196,18 +211,26 @@ async def process_git_repo(
 ):
     slug = slugify_project_name(payload.project_name)
     if storage_enabled():
-        upsert_project(
-            db,
-            current_user.id,
-            slug,
-            payload.project_name.strip(),
-            "git",
-            payload.repo_url,
-            status="processing",
-            stage="clone",
-            message=f"Repository clone started as '{slug}'.",
-            progress=1,
-        )
+        try:
+            project = upsert_project(
+                db,
+                current_user.id,
+                slug,
+                payload.project_name.strip(),
+                "git",
+                payload.repo_url,
+                status="processing",
+                stage="clone",
+                message=f"Repository clone started as '{slug}'.",
+                progress=1,
+            )
+            print(
+                f"[persistence] project row ready id={project.id} user={current_user.id} slug={slug} source=git",
+                flush=True,
+            )
+        except Exception as exc:
+            print(f"[persistence] failed to create project row user={current_user.id} slug={slug}: {exc}", flush=True)
+            raise HTTPException(status_code=500, detail="Failed to create durable project record.") from exc
     ensure_project_dirs(current_user.id, slug)
     root = project_root(current_user.id, slug)
     if root.exists():
