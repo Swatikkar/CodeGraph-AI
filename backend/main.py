@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
 from config import settings
 from graph import codegraph_app
@@ -21,7 +22,20 @@ from tools.file_ops import write_project_file_after_approval
 from tools.ingester import purge_project_from_chroma
 from tools.retriever import invalidate_vectorstore_cache
 from utils.auth import auth_router, get_current_user
+from utils.database import SessionLocal, get_db
 from utils.guardrails import screen_user_prompt, validate_image_upload, validate_zip_upload
+from utils.project_persistence import (
+    delete_project_from_db,
+    ensure_retrieval_cache,
+    list_user_projects_from_db,
+    materialize_project_from_db,
+    persist_chat_message,
+    persist_project_snapshot,
+    read_chat_messages,
+    require_project,
+    storage_enabled,
+    upsert_project,
+)
 from utils.storage import (
     architecture_path,
     delete_project_artifacts,
@@ -103,6 +117,11 @@ def run_pipeline_in_background(user_id: str, project_name: str):
         codegraph_app.invoke(state, config={"recursion_limit": recursion_limit})
     except Exception as exc:
         write_status(user_id, project_name, "error", "pipeline", "Background analysis failed.", 0, str(exc))
+    finally:
+        try:
+            persist_project_snapshot(user_id, project_name)
+        except Exception as exc:
+            print(f"[persistence] warning: failed to persist project snapshot: {exc}", flush=True)
 
 
 def safe_extract_zip(zip_path: Path, destination: Path):
@@ -127,9 +146,22 @@ async def process_zip_upload(
     project_name: str = Form(...),
     file: UploadFile = File(...),
     current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     await validate_zip_upload(file)
     slug = slugify_project_name(project_name)
+    if storage_enabled():
+        upsert_project(
+            db,
+            current_user.id,
+            slug,
+            project_name.strip(),
+            "zip",
+            status="processing",
+            stage="upload",
+            message=f"Project '{slug}' upload started.",
+            progress=1,
+        )
     ensure_project_dirs(current_user.id, slug)
     root = project_root(current_user.id, slug)
     zip_path = user_upload_root(current_user.id) / f"{slug}.zip"
@@ -156,8 +188,26 @@ async def process_zip_upload(
 
 
 @app.post("/api/process-git")
-async def process_git_repo(payload: GitRepoPayload, background_tasks: BackgroundTasks, current_user=Depends(get_current_user)):
+async def process_git_repo(
+    payload: GitRepoPayload,
+    background_tasks: BackgroundTasks,
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     slug = slugify_project_name(payload.project_name)
+    if storage_enabled():
+        upsert_project(
+            db,
+            current_user.id,
+            slug,
+            payload.project_name.strip(),
+            "git",
+            payload.repo_url,
+            status="processing",
+            stage="clone",
+            message=f"Repository clone started as '{slug}'.",
+            progress=1,
+        )
     ensure_project_dirs(current_user.id, slug)
     root = project_root(current_user.id, slug)
     if root.exists():
@@ -183,7 +233,10 @@ async def process_git_repo(payload: GitRepoPayload, background_tasks: Background
 
 
 @app.get("/api/projects")
-async def list_user_projects(current_user=Depends(get_current_user)):
+async def list_user_projects(current_user=Depends(get_current_user), db: Session = Depends(get_db)):
+    if storage_enabled():
+        return {"projects": list_user_projects_from_db(db, current_user.id)}
+
     root = user_upload_root(current_user.id)
     if not root.exists():
         return {"projects": []}
@@ -200,13 +253,17 @@ async def list_user_projects(current_user=Depends(get_current_user)):
 
 
 @app.delete("/api/projects/{project_name}")
-async def delete_project(project_name: str, current_user=Depends(get_current_user)):
+async def delete_project(project_name: str, current_user=Depends(get_current_user), db: Session = Depends(get_db)):
     slug = slugify_project_name(project_name)
+    if storage_enabled():
+        require_project(db, current_user.id, slug)
     isolated_name = project_namespace(current_user.id, slug)
     write_status(current_user.id, slug, "delete_pending", "delete", f"Project '{slug}' is being deleted.", 0)
     invalidate_vectorstore_cache(isolated_name)
     cleanup_complete = delete_project_artifacts(current_user.id, slug)
     purge_project_from_chroma(isolated_name)
+    if storage_enabled():
+        delete_project_from_db(db, current_user.id, slug)
     if cleanup_complete:
         return {"message": f"Project '{slug}' was deleted.", "cleanup_deferred": False}
     return {
@@ -229,8 +286,10 @@ def generate_file_tree(dir_path: Path, base_path: Path):
 
 
 @app.get("/api/project-structure/{project_name}")
-async def get_project_structure(project_name: str, current_user=Depends(get_current_user)):
+async def get_project_structure(project_name: str, current_user=Depends(get_current_user), db: Session = Depends(get_db)):
     slug = slugify_project_name(project_name)
+    if storage_enabled():
+        materialize_project_from_db(db, current_user.id, slug)
     root = project_root(current_user.id, slug)
     if not root.exists():
         raise HTTPException(status_code=404, detail="Project not found.")
@@ -238,40 +297,56 @@ async def get_project_structure(project_name: str, current_user=Depends(get_curr
 
 
 @app.get("/api/file-content")
-async def get_file_content(path: str, project_name: str, current_user=Depends(get_current_user)):
-    target = resolve_project_file(current_user.id, project_name, path)
+async def get_file_content(path: str, project_name: str, current_user=Depends(get_current_user), db: Session = Depends(get_db)):
+    slug = slugify_project_name(project_name)
+    if storage_enabled():
+        materialize_project_from_db(db, current_user.id, slug)
+    target = resolve_project_file(current_user.id, slug, path)
     if not target.exists() or not target.is_file():
         raise HTTPException(status_code=404, detail="File not found.")
     return {"path": path, "content": target.read_text(encoding="utf-8", errors="replace")}
 
 
 @app.get("/api/project-tree/{project_name}")
-async def get_project_tree_endpoint(project_name: str, current_user=Depends(get_current_user)):
-    path = tree_cache_path(current_user.id, project_name)
+async def get_project_tree_endpoint(project_name: str, current_user=Depends(get_current_user), db: Session = Depends(get_db)):
+    slug = slugify_project_name(project_name)
+    if storage_enabled():
+        materialize_project_from_db(db, current_user.id, slug)
+    path = tree_cache_path(current_user.id, slug)
     if not path.exists():
         raise HTTPException(status_code=404, detail="Project file tree map not found.")
     return {"project_name": project_name, "tree": path.read_text(encoding="utf-8")}
 
 
 @app.get("/api/architecture/{project_name}")
-async def get_architecture_diagram(project_name: str, current_user=Depends(get_current_user)):
-    path = architecture_path(current_user.id, project_name)
+async def get_architecture_diagram(project_name: str, current_user=Depends(get_current_user), db: Session = Depends(get_db)):
+    slug = slugify_project_name(project_name)
+    if storage_enabled():
+        materialize_project_from_db(db, current_user.id, slug)
+    path = architecture_path(current_user.id, slug)
     if not path.exists():
         raise HTTPException(status_code=404, detail="Architecture diagram not found.")
     return {"project_name": project_name, "mermaid_code": path.read_text(encoding="utf-8")}
 
 
 @app.get("/api/dependency-graph/{project_name}")
-async def get_dependency_graph(project_name: str, current_user=Depends(get_current_user)):
-    path = dependency_graph_path(current_user.id, project_name)
+async def get_dependency_graph(project_name: str, current_user=Depends(get_current_user), db: Session = Depends(get_db)):
+    slug = slugify_project_name(project_name)
+    if storage_enabled():
+        materialize_project_from_db(db, current_user.id, slug)
+    path = dependency_graph_path(current_user.id, slug)
     if not path.exists():
         raise HTTPException(status_code=404, detail="Dependency graph not found.")
     return {"project_name": project_name, "mermaid_code": path.read_text(encoding="utf-8")}
 
 
 @app.get("/api/chat-history/{project_name}")
-async def get_chat_history(project_name: str, current_user=Depends(get_current_user)):
-    authenticated_thread_id = f"user_{current_user.id}_{project_name}"
+async def get_chat_history(project_name: str, current_user=Depends(get_current_user), db: Session = Depends(get_db)):
+    slug = slugify_project_name(project_name)
+    if storage_enabled():
+        return {"messages": read_chat_messages(db, current_user.id, slug)}
+
+    authenticated_thread_id = f"user_{current_user.id}_{slug}"
     config = {"configurable": {"thread_id": authenticated_thread_id}}
     state = chat_graph_app.get_state(config)
     messages = []
@@ -284,8 +359,11 @@ async def get_chat_history(project_name: str, current_user=Depends(get_current_u
 
 
 @app.post("/api/chat")
-async def handle_chat_interaction(payload: ChatPayload, current_user=Depends(get_current_user)):
+async def handle_chat_interaction(payload: ChatPayload, current_user=Depends(get_current_user), db: Session = Depends(get_db)):
     slug = slugify_project_name(payload.project_name)
+    if storage_enabled():
+        materialize_project_from_db(db, current_user.id, slug)
+        ensure_retrieval_cache(db, current_user.id, slug)
     allowed, guardrail_error = screen_user_prompt(payload.query)
     if not allowed:
         raise HTTPException(status_code=400, detail=guardrail_error)
@@ -293,6 +371,8 @@ async def handle_chat_interaction(payload: ChatPayload, current_user=Depends(get
     authenticated_thread_id = f"user_{current_user.id}_{payload.thread_id}"
     project_id = project_namespace(current_user.id, slug)
     config = {"configurable": {"thread_id": authenticated_thread_id}}
+    if storage_enabled() and not payload.is_approval:
+        persist_chat_message(db, current_user.id, slug, "user", payload.query)
 
     def event_stream():
         try:
@@ -301,6 +381,7 @@ async def handle_chat_interaction(payload: ChatPayload, current_user=Depends(get
                     yield sse_event("error", content="Approval requires file path and replacement content.")
                 else:
                     result = write_project_file_after_approval(project_id, payload.approval_file_path, payload.approval_new_content)
+                    persist_project_snapshot(current_user.id, slug)
                     yield sse_event("tool_result", tool="write_project_file_after_approval", content=result)
                     yield sse_event("done")
                 return
@@ -352,6 +433,12 @@ async def handle_chat_interaction(payload: ChatPayload, current_user=Depends(get
                     yield sse_event("chunk", content=content)
 
             state = chat_graph_app.get_state(config)
+            if storage_enabled() and accumulated.strip():
+                db_session = SessionLocal()
+                try:
+                    persist_chat_message(db_session, current_user.id, slug, "bot", accumulated)
+                finally:
+                    db_session.close()
             if state and state.values and state.values.get("provider_events"):
                 for event in state.values["provider_events"]:
                     if not isinstance(event, dict):

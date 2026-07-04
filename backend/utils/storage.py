@@ -101,6 +101,13 @@ def write_status(user_id: int | str, project_name: str, status: str, stage: str,
     else:
         payload["created_at"] = payload["updated_at"]
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    if settings.use_supabase_storage:
+        try:
+            from utils.project_persistence import sync_project_status
+
+            sync_project_status(user_id, project_name, status, stage, message, progress, error)
+        except Exception as exc:
+            print(f"[storage] warning: failed to sync project status to database: {exc}", flush=True)
     return payload
 
 

@@ -9,6 +9,8 @@ services:
     envVars:
       - key: ENVIRONMENT
         value: production
+      - key: STORAGE_MODE
+        value: supabase
       - key: BACKEND_CORS_ORIGINS
         sync: false
       - key: JWT_SECRET_KEY

@@ -28,6 +28,11 @@ class Token(BaseModel):
     access_token: str
     token_type: str
 
+
+class PasswordChange(BaseModel):
+    current_password: str = Field(min_length=8, max_length=128)
+    new_password: str = Field(min_length=8, max_length=128)
+
 # ==========================================
 # DEPENDENCY
 # ==========================================
@@ -106,3 +111,22 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = 
 @auth_router.get("/me")
 async def get_me(current_user = Depends(get_current_user)):
     return {"email": current_user.email, "id": current_user.id}
+
+
+@auth_router.post("/change-password")
+async def change_password(
+    payload: PasswordChange,
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if settings.AUTH_PROVIDER == "supabase":
+        raise HTTPException(status_code=400, detail="Password changes must be handled by Supabase auth.")
+
+    user = db.query(UserModel).filter(UserModel.id == current_user.id).first()
+    if not user or not bcrypt.checkpw(payload.current_password.encode("utf-8"), user.hashed_password.encode("utf-8")):
+        raise HTTPException(status_code=400, detail="Current password is incorrect.")
+
+    salt = bcrypt.gensalt()
+    user.hashed_password = bcrypt.hashpw(payload.new_password.encode("utf-8"), salt).decode("utf-8")
+    db.commit()
+    return {"message": "Password changed successfully."}

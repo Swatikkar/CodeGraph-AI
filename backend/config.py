@@ -35,6 +35,7 @@ class Settings(BaseSettings):
 
     BACKEND_CORS_ORIGINS: str = "http://localhost:5173,http://127.0.0.1:5173"
     DATABASE_URL: str | None = None
+    STORAGE_MODE: str = "local"
 
     MODEL_PROVIDER_ORDER: str = "groq,gemini,ollama,openrouter,nvidia,huggingface"
     SUPERVISOR_REASONING_MODELS: str = (
@@ -122,6 +123,10 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.ENVIRONMENT.lower() == "production"
+
+    @property
+    def use_supabase_storage(self) -> bool:
+        return self.STORAGE_MODE.lower() == "supabase"
 
     @property
     def resolved_database_url(self) -> str:
