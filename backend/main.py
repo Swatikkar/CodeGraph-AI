@@ -82,6 +82,25 @@ class ChatPayload(BaseModel):
     approval_new_content: str | None = None
 
 
+def sanitize_user_facing_text(text: str, user_id: int | str, slug: str) -> str:
+    if not text:
+        return text
+    sanitized = str(text)
+    namespace = project_namespace(user_id, slug)
+    replacements = {
+        namespace: slug,
+        f"`{namespace}`": f"`{slug}`",
+        "Supervisor Agent": "codebase assistant",
+        "Debugger Agent": "debugging assistant",
+        "CodeGraph AI project": "project",
+    }
+    for old, new in replacements.items():
+        sanitized = sanitized.replace(old, new)
+    sanitized = __import__("re").sub(r"\buser[_-]?\d+[_-][A-Za-z0-9_.-]+\b", slug, sanitized)
+    sanitized = __import__("re").sub(r"\b\d+_[A-Za-z0-9][A-Za-z0-9_.-]*\b", slug, sanitized)
+    return sanitized
+
+
 def sse_event(event_type: str, **payload) -> str:
     return f"data: {json.dumps({'type': event_type, **payload})}\n\n"
 
@@ -436,7 +455,7 @@ async def handle_chat_interaction(payload: ChatPayload, current_user=Depends(get
                     continue
 
                 if chunk.type == "tool":
-                    content = str(chunk.content)
+                    content = sanitize_user_facing_text(str(chunk.content), current_user.id, slug)
                     print(f"[tool-call] result {getattr(chunk, 'name', 'tool')} chars={len(content)}", flush=True)
                     for source in sorted(set(__import__("re").findall(r"File: ([^)\n,]+)", content))):
                         yield sse_event("reference", path=source)
@@ -447,7 +466,7 @@ async def handle_chat_interaction(payload: ChatPayload, current_user=Depends(get
                     continue
 
                 if chunk.type == "ai" and chunk.content:
-                    content = normalize_ai_content(chunk.content)
+                    content = sanitize_user_facing_text(normalize_ai_content(chunk.content), current_user.id, slug)
                     if "ROUTE_TO_DEBUGGER" in content:
                         continue
                     if re_search_tool_leak(content):
@@ -473,7 +492,11 @@ async def handle_chat_interaction(payload: ChatPayload, current_user=Depends(get
             if state and state.values and "messages" in state.values:
                 for message in reversed(state.values["messages"]):
                     if getattr(message, "type", None) == "ai" and getattr(message, "content", None):
-                        final_content = normalize_ai_content(message.content)
+                        final_content = sanitize_user_facing_text(
+                            normalize_ai_content(message.content),
+                            current_user.id,
+                            slug,
+                        )
                         if "ROUTE_TO_DEBUGGER" not in final_content and final_content not in accumulated:
                             accumulated += final_content
                             yield sse_event("chunk", content=final_content)

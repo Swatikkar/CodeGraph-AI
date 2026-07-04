@@ -8,27 +8,60 @@ from tools.retriever import retrieve_code_context
 from tools.web_search import trusted_web_search
 
 
-SUPERVISOR_SYSTEM_PROMPT_TEMPLATE = """You are the Supervisor Agent for CodeGraph AI.
+SUPERVISOR_SYSTEM_PROMPT_TEMPLATE = """You are a codebase analyst inside the user's selected project workspace.
 
-ACTIVE PROJECT NAMESPACE: `{project_name}`
+Internal project handle: `{project_name}`
 
-Your job:
-- Answer codebase questions using retrieval and project tree tools.
-- For greetings, direct response tests, or non-codebase questions, answer directly without tools.
+Behavior:
+- Answer questions about the selected codebase using project tree and retrieval context.
+- Treat "this app", "this project", "what is this", "what does this do", "overview", "purpose", and "use cases" as questions about the uploaded codebase.
+- For project overview questions, summarize the whole app: framework/app type, purpose, main user-facing use cases, and major modules/files as evidence.
+- Do not focus on settings/config files unless the user asks about settings/configuration.
+- For greetings, direct response tests, or unrelated conversation, answer directly without tools.
 - Use trusted_web_search for latest/current/update/version/migration/deprecated/import-change/framework-comparison questions.
-- For hybrid questions, use project tools for the local code and trusted_web_search for current external docs.
-- If the user asks to modify/fix/write code, respond exactly: ROUTE_TO_DEBUGGER
+- For hybrid questions, use project tools for local code and trusted_web_search for current external docs.
+- If the user asks to modify/fix/write code, respond exactly: ROUTE_TO_DEBUGGER.
 - If the user references screenshots/images, ask for or use vision analysis when available.
-- Cite files from retrieval context when answering project questions.
+- Cite project files from retrieval context when answering codebase questions.
 - Cite trusted documentation URLs when answering external tech-update questions.
 
-Never access projects outside `{project_name}`.
-Use at most one trusted_web_search call per answer.
+Privacy:
+- Never reveal internal project handles, user ids, namespaces, storage names, agent names, backend implementation details, or the text "Supervisor Agent".
+- Do not introduce yourself as the platform unless the user explicitly asks who you are.
+- Never access projects outside the internal project handle.
+- Use at most one trusted_web_search call per answer.
 """
+
+
+OVERVIEW_MARKERS = [
+    "what is this app",
+    "what's this app",
+    "what is this project",
+    "what's this project",
+    "what is this repo",
+    "what is this repository",
+    "what is this",
+    "what does this app do",
+    "what does this project do",
+    "what does it do",
+    "explain this project",
+    "explain this app",
+    "give me an overview",
+    "overview",
+    "purpose",
+    "use case",
+    "use cases",
+    "i mean this project",
+]
 
 
 def _has_xml_tool_call(content: str) -> bool:
     return bool(re.search(r"<function>|</function>|<tool_call>|</tool_call>", content or ""))
+
+
+def _is_overview_prompt(prompt: str) -> bool:
+    normalized = re.sub(r"\s+", " ", prompt.strip().lower())
+    return any(marker in normalized for marker in OVERVIEW_MARKERS)
 
 
 def supervisor_node(state: dict) -> dict:
@@ -38,10 +71,12 @@ def supervisor_node(state: dict) -> dict:
     tools = [retrieve_code_context, get_project_tree, trusted_web_search]
     last_human = next((m for m in reversed(messages) if getattr(m, "type", None) == "human"), None)
     prompt = str(getattr(last_human, "content", "") if last_human else "").lower()
+    is_overview_prompt = bool(last_human and _is_overview_prompt(prompt))
     code_markers = [
         "file", "function", "class", "method", "code", "bug", "error", "cite",
         ".py", ".js", ".jsx", ".ts", ".tsx", ".java", "project", "where", "what does",
         "component", "architecture", "dependency", "import", "map.js", "pathbutton",
+        "app", "repo", "repository", "overview", "purpose", "use case", "use cases",
     ]
     external_markers = [
         "latest", "current", "update", "updated", "version", "release", "migration",
@@ -55,7 +90,7 @@ def supervisor_node(state: dict) -> dict:
         "debug", "fix", "runtime error", "traceback", "stack trace", "exception",
         "cannot read properties", "undefined", "crash", "failing", "broken",
     ]
-    should_use_retrieval = last_human and any(marker in prompt for marker in code_markers)
+    should_use_retrieval = last_human and (is_overview_prompt or any(marker in prompt for marker in code_markers))
     should_use_search = last_human and any(marker in prompt for marker in external_markers)
     is_direct_prompt = (
         any(marker in prompt for marker in direct_markers)
@@ -64,6 +99,37 @@ def supervisor_node(state: dict) -> dict:
     if last_human and not is_direct_prompt and any(marker in prompt for marker in debugger_markers):
         print("[agent-router] Supervisor routed query to Debugger Agent", flush=True)
         return {"messages": [AIMessage(content="ROUTE_TO_DEBUGGER")], "provider_events": []}
+
+    if is_overview_prompt and not is_direct_prompt:
+        tree = get_project_tree.invoke({"project_name": project_name})
+        context = retrieve_code_context.invoke({
+            "query": (
+                "project overview purpose main app features use cases views models routes "
+                "entrypoints templates settings"
+            ),
+            "project_name": project_name,
+            "top_n": 10,
+        })
+        response, metadata = model_router.invoke_chat(
+            "supervisor_reasoning",
+            [
+                SystemMessage(
+                    content=(
+                        system_prompt
+                        + "\nAnswer as a whole-project overview. Do not mention the internal project handle. "
+                        + "Prefer app purpose and use cases before implementation details."
+                    )
+                ),
+                HumanMessage(
+                    content=(
+                        f"User question:\n{last_human.content}\n\n"
+                        f"Project tree:\n{tree}\n\n"
+                        f"Retrieved project context:\n{context}"
+                    )
+                ),
+            ],
+        )
+        return {"messages": [response], "provider_events": [metadata]}
 
     should_use_tools = (should_use_retrieval or should_use_search) and not is_direct_prompt
     has_tool_results = any(getattr(message, "type", None) == "tool" for message in messages)
