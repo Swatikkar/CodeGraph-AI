@@ -97,7 +97,8 @@ export default function Dashboard() {
   const hostedZipTargetBytes = Number(
     import.meta.env.VITE_HOSTED_ZIP_TARGET_BYTES || 80 * 1024 * 1024,
   );
-  const maxZipBytes = configuredMaxZipBytes;
+  // Keep the client-side guard aligned with the backend's 1 GB archive limit.
+  const maxZipBytes = Math.max(configuredMaxZipBytes, 1073741824);
   const maxZipLabel =
     maxZipBytes >= 1024 * 1024 * 1024
       ? `${Math.round(maxZipBytes / 1024 / 1024 / 1024)} GB`
