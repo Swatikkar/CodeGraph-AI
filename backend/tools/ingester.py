@@ -67,7 +67,7 @@ def ingest_to_chroma(files_to_process: list, project_name: str, project_root: st
     Reads physical code files, chunks them using language-aware splitting,
     and embeds them into a Chroma vector store.
     """
-    print(f"\n📚 Starting Vector Ingestion for {project_name}...")
+    print(f"\nStarting vector ingestion for {project_name}...")
 
     all_chunks = []
 
@@ -128,7 +128,7 @@ def ingest_to_chroma(files_to_process: list, project_name: str, project_root: st
     )
     close_vectorstore(vectorstore)
 
-    print(f"✅ Successfully saved vector database to {project_db_path}")
+    print(f"Successfully saved vector database to {project_db_path}")
 
     # Invalidate stale vectorstore + query cache so next query loads fresh data
     invalidate_vectorstore_cache(project_name)
