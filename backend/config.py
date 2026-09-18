@@ -39,10 +39,10 @@ class Settings(BaseSettings):
 
     MODEL_PROVIDER_ORDER: str = "groq,gemini,ollama,openrouter,nvidia,huggingface"
     SUPERVISOR_REASONING_MODELS: str = (
-        "groq:llama-3.1-8b-instant,"
+        "groq:openai/gpt-oss-20b,"
         "gemini:gemini-2.5-flash,"
         "ollama:qwen2.5-coder:3b,"
-        "groq:llama-3.3-70b-versatile,"
+        "groq:openai/gpt-oss-120b,"
         "gemini:gemini-2.5-pro,"
         "openrouter:nvidia/nemotron-3-ultra-550b-a55b:free"
     )
@@ -50,11 +50,11 @@ class Settings(BaseSettings):
         "groq:openai/gpt-oss-120b,"
         "gemini:gemini-2.5-flash,"
         "ollama:qwen2.5-coder:3b,"
-        "groq:qwen/qwen3-32b,"
+        "groq:openai/gpt-oss-120b,"
         "openrouter:cohere/north-mini-code:free"
     )
     COMMENTER_CODE_DOCS_MODELS: str = (
-        "groq:llama-3.1-8b-instant,"
+        "groq:openai/gpt-oss-20b,"
         "gemini:gemini-2.5-flash-lite,"
         "ollama:qwen2.5-coder:3b,"
         "openrouter:cohere/north-mini-code:free"
@@ -62,10 +62,10 @@ class Settings(BaseSettings):
     ARCHITECTURE_DESIGN_MODELS: str = (
         "gemini:gemini-2.5-flash,"
         "ollama:qwen2.5-coder:3b,"
-        "groq:llama-3.3-70b-versatile,"
+        "groq:openai/gpt-oss-120b,"
         "openrouter:nvidia/nemotron-3-ultra-550b-a55b:free"
     )
-    RETRIEVAL_QUERY_MODELS: str = "gemini:gemini-2.5-flash-lite,ollama:qwen2.5-coder:3b,groq:llama-3.1-8b-instant"
+    RETRIEVAL_QUERY_MODELS: str = "gemini:gemini-2.5-flash-lite,ollama:qwen2.5-coder:3b,groq:openai/gpt-oss-20b"
     VISION_ERROR_ANALYSIS_MODELS: str = (
         "gemini:gemini-2.5-flash,"
         "nvidia:meta/llama-3.2-90b-vision-instruct,"
