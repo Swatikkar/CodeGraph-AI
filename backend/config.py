@@ -88,6 +88,7 @@ class Settings(BaseSettings):
     )
     GUARDRAIL_MODELS: str = "gemini:gemini-2.5-flash-lite,groq:llama-guard-4-12b"
     EMBEDDING_MODELS: str = (
+        "local:hashing-v1,"
         "gemini:gemini-embedding-001,"
         "huggingface:sentence-transformers/all-MiniLM-L6-v2,"
         "ollama:nomic-embed-text"

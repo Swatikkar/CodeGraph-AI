@@ -23,6 +23,8 @@ from fastapi.testclient import TestClient
 from fastapi import HTTPException
 
 from agents.commenter import commenter_node
+from providers.local_embeddings import LocalHashingEmbeddings
+from providers.router import ModelRouter
 from config import settings
 from main import app, release_local_ingestion_slot, reserve_local_ingestion_slot, run_pipeline_in_background
 from models.user import ProjectModel
@@ -105,6 +107,26 @@ class HealthEndpointTests(unittest.TestCase):
         self.assertEqual(source_path.read_text(encoding="utf-8"), original)
         self.assertEqual(result["processed_files"], [str(source_path)])
         self.assertEqual(result["comment_report"][0]["status"], "preserved_original")
+
+    def test_local_embeddings_are_deterministic_and_fixed_width(self):
+        embeddings = LocalHashingEmbeddings()
+        first = embeddings.embed_query("def calculate_total(items): return sum(items)")
+        repeated = embeddings.embed_query("def calculate_total(items): return sum(items)")
+        unrelated = embeddings.embed_query("class DatabaseConnection: pass")
+
+        self.assertEqual(len(first), 384)
+        self.assertEqual(first, repeated)
+        self.assertNotEqual(first, unrelated)
+
+    def test_embedding_router_can_run_without_external_provider(self):
+        previous_routes = settings.EMBEDDING_MODELS
+        settings.EMBEDDING_MODELS = "local:hashing-v1"
+        try:
+            embeddings = ModelRouter().embeddings()
+        finally:
+            settings.EMBEDDING_MODELS = previous_routes
+
+        self.assertIsInstance(embeddings, LocalHashingEmbeddings)
 
     def test_durable_reservation_rejects_processing_and_allows_terminal_retry(self):
         user_id = "duplicate-test-user"

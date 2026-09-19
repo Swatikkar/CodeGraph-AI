@@ -226,6 +226,11 @@ class ModelRouter:
         errors = []
         for route in self.routes_for_role("embedding"):
             try:
+                if route.provider == "local" and route.model == "hashing-v1":
+                    from providers.local_embeddings import LocalHashingEmbeddings
+
+                    _log_provider(f"embedding: selected {route.label}")
+                    return LocalHashingEmbeddings()
                 if route.provider == "gemini":
                     if not settings.GEMINI_API_KEY:
                         raise ProviderError(route.provider, route.model, "GEMINI_API_KEY is not configured.")
@@ -245,6 +250,7 @@ class ModelRouter:
                     from langchain_ollama import OllamaEmbeddings
 
                     return OllamaEmbeddings(model=route.model, base_url=settings.OLLAMA_BASE_URL)
+                errors.append(f"{route.label}: unsupported embedding provider")
             except Exception as exc:
                 errors.append(f"{route.label}: {exc}")
         raise ProviderError("embedding", "none", "No embedding provider is configured. " + " | ".join(errors))

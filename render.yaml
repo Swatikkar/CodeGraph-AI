@@ -68,7 +68,7 @@ services:
       - key: VISION_ERROR_ANALYSIS_MODELS
         value: gemini:gemini-2.5-flash,nvidia:meta/llama-3.2-90b-vision-instruct,nvidia:meta/llama-3.2-11b-vision-instruct,openrouter:google/gemini-2.5-flash
       - key: EMBEDDING_MODELS
-        value: gemini:gemini-embedding-001,huggingface:sentence-transformers/all-MiniLM-L6-v2
+        value: local:hashing-v1,gemini:gemini-embedding-001,huggingface:sentence-transformers/all-MiniLM-L6-v2
       - key: LANGSMITH_TRACING
         value: "false"
       - key: LANGSMITH_PROJECT
