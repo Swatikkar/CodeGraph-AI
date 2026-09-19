@@ -52,8 +52,8 @@ class Settings(BaseSettings):
 
     MODEL_PROVIDER_ORDER: str = "groq,gemini,ollama,openrouter,nvidia,huggingface"
     SUPERVISOR_REASONING_MODELS: str = (
-        "groq:openai/gpt-oss-20b,"
         "groq:openai/gpt-oss-120b,"
+        "groq:openai/gpt-oss-20b,"
         "openrouter:nvidia/nemotron-3-ultra-550b-a55b:free"
     )
     DEBUGGER_CODING_MODELS: str = (

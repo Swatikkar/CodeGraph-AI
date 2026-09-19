@@ -58,7 +58,7 @@ services:
       - key: MAX_IMAGE_BYTES
         value: "5000000"
       - key: SUPERVISOR_REASONING_MODELS
-        value: groq:openai/gpt-oss-20b,groq:openai/gpt-oss-120b,openrouter:nvidia/nemotron-3-ultra-550b-a55b:free
+        value: groq:openai/gpt-oss-120b,groq:openai/gpt-oss-20b,openrouter:nvidia/nemotron-3-ultra-550b-a55b:free
       - key: DEBUGGER_CODING_MODELS
         value: groq:openai/gpt-oss-120b,gemini:gemini-2.5-flash,openrouter:cohere/north-mini-code:free
       - key: COMMENTER_CODE_DOCS_MODELS
