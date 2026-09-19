@@ -22,7 +22,7 @@ from fastapi.testclient import TestClient
 
 from config import settings
 from main import app
-from utils.database import engine
+from utils.database import build_engine_options, engine
 from utils.readiness import critical_config_errors
 
 
@@ -75,6 +75,12 @@ class HealthEndpointTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json(), {"detail": "Service dependencies are not ready."})
+
+    def test_postgres_disables_client_side_prepared_statements(self):
+        options = build_engine_options("postgresql+psycopg://user:password@pooler/db")
+
+        self.assertIsNone(options["connect_args"]["prepare_threshold"])
+        self.assertTrue(options["pool_pre_ping"])
 
 
 if __name__ == "__main__":

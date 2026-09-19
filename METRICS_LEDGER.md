@@ -109,3 +109,19 @@ Three fresh `import main` processes measured 2.455 s, 2.526 s, and 2.443 s (mean
 ### Frontend build after Phase 0
 
 The warm build completed in 12.36 s and the main chunk changed from 528.95 kB to 528.92 kB. The timing difference is not attributed to the lint fix because build cache/machine noise was not controlled. Large-chunk optimization remains a later phase.
+
+## Phase 0 deployment hotfix — 2026-09-19
+
+Render deployment `dep-dan4t4ijnfac738i7rpg` failed after 1 minute 39 seconds during application startup. The verified exception was `psycopg.errors.DuplicatePreparedStatement` while SQLAlchemy inspected `chat_messages` through the Supabase/Postgres pooler.
+
+Implemented fix:
+
+- Disable Psycopg client-side prepared statements for PostgreSQL connections with `prepare_threshold=None`.
+- Preserve connection pre-ping and bounded pool/connect timeouts.
+- Add a regression test that asserts the production Postgres engine configuration.
+
+| Check | Result |
+| --- | --- |
+| Targeted backend suite after hotfix | 5/5 passed |
+| Render startup | Pending redeployment |
+| Public `/api/ready` | Pending redeployment |
