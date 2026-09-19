@@ -2,6 +2,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 TEST_ROOT = tempfile.TemporaryDirectory(prefix="codegraph-phase0-")
@@ -23,7 +24,7 @@ from fastapi import HTTPException
 
 from agents.commenter import commenter_node
 from config import settings
-from main import app
+from main import app, release_local_ingestion_slot, reserve_local_ingestion_slot, run_pipeline_in_background
 from models.user import ProjectModel
 from utils.database import SessionLocal, build_engine_options, engine
 from utils.project_persistence import reserve_project_ingestion
@@ -129,6 +130,40 @@ class HealthEndpointTests(unittest.TestCase):
             db.query(ProjectModel).filter(ProjectModel.user_id == user_id, ProjectModel.slug == slug).delete()
             db.commit()
             db.close()
+
+    def test_pipeline_publishes_ready_only_after_snapshot_persistence(self):
+        events = []
+        user_id = "pipeline-order-user"
+        project_name = "pipeline-order-project"
+        self.assertTrue(reserve_local_ingestion_slot(user_id, project_name))
+        with (
+            patch("main.codegraph_app.invoke", return_value={"errors": []}),
+            patch("main.read_status", return_value={"status": "processing"}),
+            patch("main.persist_project_snapshot", side_effect=lambda *_args: events.append("persist")),
+            patch("main.write_status", side_effect=lambda _user, _project, status, *_args: events.append(status)),
+        ):
+            run_pipeline_in_background(user_id, project_name)
+
+        self.assertEqual(events, ["persist", "ready"])
+        self.assertTrue(reserve_local_ingestion_slot(user_id, project_name))
+        release_local_ingestion_slot(user_id, project_name)
+
+    def test_snapshot_failure_is_terminal_and_never_reports_ready(self):
+        statuses = []
+        user_id = "pipeline-failure-user"
+        project_name = "pipeline-failure-project"
+        self.assertTrue(reserve_local_ingestion_slot(user_id, project_name))
+        with (
+            patch("main.codegraph_app.invoke", return_value={"errors": []}),
+            patch("main.read_status", return_value={"status": "processing"}),
+            patch("main.persist_project_snapshot", side_effect=RuntimeError("database unavailable")),
+            patch("main.write_status", side_effect=lambda _user, _project, status, *_args: statuses.append(status)),
+        ):
+            run_pipeline_in_background(user_id, project_name)
+
+        self.assertEqual(statuses, ["error"])
+        self.assertTrue(reserve_local_ingestion_slot(user_id, project_name))
+        release_local_ingestion_slot(user_id, project_name)
 
 
 if __name__ == "__main__":

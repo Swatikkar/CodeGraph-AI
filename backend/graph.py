@@ -117,7 +117,14 @@ def ingestion_node(state: GraphState):
     else:
         embedded_chunks = 0
     write_ingestion_report(state, stage="embed", embedded_chunks=embedded_chunks)
-    write_status(state["user_id"], state["project_name"], "ready", "complete", "Project is ready for chat.", 100)
+    write_status(
+        state["user_id"],
+        state["project_name"],
+        "processing",
+        "persist",
+        "Publishing the completed project...",
+        95,
+    )
     return state
 
 

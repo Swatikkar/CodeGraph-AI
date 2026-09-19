@@ -193,6 +193,7 @@ def normalize_ai_content(raw_content) -> str:
 
 
 def run_pipeline_in_background(user_id: str, project_name: str):
+    pipeline_succeeded = False
     try:
         state = {
             "user_id": str(user_id),
@@ -205,14 +206,19 @@ def run_pipeline_in_background(user_id: str, project_name: str):
             "errors": [],
         }
         recursion_limit = max(50, settings.MAX_PROJECT_FILES + 10)
-        codegraph_app.invoke(state, config={"recursion_limit": recursion_limit})
+        result = codegraph_app.invoke(state, config={"recursion_limit": recursion_limit})
+        pipeline_succeeded = not result.get("errors") and read_status(user_id, project_name).get("status") != "error"
     except Exception as exc:
         write_status(user_id, project_name, "error", "pipeline", "Background analysis failed.", 0, str(exc))
     finally:
         try:
             persist_project_snapshot(user_id, project_name)
         except Exception as exc:
+            pipeline_succeeded = False
+            write_status(user_id, project_name, "error", "persist", "Project persistence failed.", 0, type(exc).__name__)
             print(f"[persistence] warning: failed to persist project snapshot: {exc}", flush=True)
+        if pipeline_succeeded:
+            write_status(user_id, project_name, "ready", "complete", "Project is ready for chat.", 100)
         release_local_ingestion_slot(user_id, project_name)
 
 

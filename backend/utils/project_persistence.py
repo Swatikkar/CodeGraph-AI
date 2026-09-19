@@ -28,13 +28,11 @@ from utils.storage import (
     project_namespace,
     project_root,
     slugify_project_name,
-    status_path,
     tree_cache_path,
 )
 
 
 ARTIFACT_PATHS = {
-    "status": status_path,
     "tree": tree_cache_path,
     "architecture": architecture_path,
     "dependency_graph": dependency_graph_path,
