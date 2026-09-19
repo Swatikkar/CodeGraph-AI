@@ -38,3 +38,6 @@ Thumbs.db
 # Local scratch notes
 frontend things.txt
 docs/
+IMPLEMENTATION_PLAN.md
+METRICS_LEDGER.md
+PRODUCTION_READINESS_AUDIT.md
