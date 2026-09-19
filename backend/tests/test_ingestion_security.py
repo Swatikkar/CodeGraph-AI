@@ -4,6 +4,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 
 TEST_ROOT = tempfile.TemporaryDirectory(prefix="codegraph-ingestion-security-")
@@ -23,6 +24,7 @@ os.environ.update({
 from config import settings
 from main import release_local_ingestion_slot, reserve_local_ingestion_slot
 from tools.ingester import purge_project_from_chroma
+from tools.ingester import ingest_to_chroma
 from tools.scanner import get_codebase_map
 from utils.ingestion_security import (
     IngestionValidationError,
@@ -198,6 +200,32 @@ class DuplicateIngestionTests(unittest.TestCase):
 
         self.assertTrue(purge_project_from_chroma(namespace, strict=True))
         self.assertFalse(vector_path.exists())
+
+    def test_reingestion_replaces_collection_without_deleting_live_database(self):
+        project_file = TEST_PATH / "replace.py"
+        project_file.write_text("def replacement():\n    return 'new'\n")
+        client = MagicMock()
+        existing = MagicMock()
+        existing.name = "langchain"
+        client.list_collections.return_value = [existing]
+
+        with (
+            patch("tools.ingester.model_router.embeddings", return_value=MagicMock()),
+            patch("tools.ingester.ensure_chroma_defaults", return_value=client),
+            patch("tools.ingester.Chroma.from_documents") as from_documents,
+            patch("tools.ingester.close_vectorstore"),
+        ):
+            chunks = ingest_to_chroma(
+                [str(project_file)],
+                "replacement-project",
+                project_root=str(TEST_PATH),
+                user_id="user",
+            )
+
+        self.assertGreater(chunks, 0)
+        client.delete_collection.assert_called_once_with("langchain")
+        from_documents.assert_called_once()
+        self.assertEqual(from_documents.call_args.kwargs["collection_name"], "langchain")
 
 
 if __name__ == "__main__":

@@ -4,6 +4,9 @@ import chromadb
 from chromadb.config import DEFAULT_DATABASE, DEFAULT_TENANT
 
 
+VECTOR_COLLECTION_NAME = "langchain"
+
+
 def ensure_chroma_defaults(persist_directory: str | Path):
     """Create Chroma's default tenant/database for a fresh persistent store."""
     client = chromadb.PersistentClient(path=str(persist_directory))

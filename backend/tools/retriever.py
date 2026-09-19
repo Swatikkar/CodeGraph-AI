@@ -10,7 +10,7 @@ from langchain_core.tools import tool
 
 from config import IGNORE_DIRS, settings
 from providers import model_router
-from utils.chroma import ensure_chroma_defaults
+from utils.chroma import VECTOR_COLLECTION_NAME, ensure_chroma_defaults
 from utils.secrets import redact_secrets
 from utils.storage import project_root
 
@@ -27,6 +27,7 @@ def get_vectorstore(project_name: str) -> Chroma:
         project_db_path = settings.CHROMA_DB_DIR / project_name
         client = ensure_chroma_defaults(project_db_path)
         _vectorstore_cache[project_name] = Chroma(
+            collection_name=VECTOR_COLLECTION_NAME,
             persist_directory=str(project_db_path),
             embedding_function=model_router.embeddings(),
             client=client,

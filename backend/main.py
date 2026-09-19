@@ -209,6 +209,13 @@ def run_pipeline_in_background(user_id: str, project_name: str):
         result = codegraph_app.invoke(state, config={"recursion_limit": recursion_limit})
         pipeline_succeeded = not result.get("errors") and read_status(user_id, project_name).get("status") != "error"
     except Exception as exc:
+        log_event(
+            "ingestion_pipeline_failed",
+            user_id=str(user_id),
+            project_name=project_name,
+            error_type=type(exc).__name__,
+            error_message=str(exc)[:500],
+        )
         write_status(user_id, project_name, "error", "pipeline", "Background analysis failed.", 0, str(exc))
     finally:
         try:
