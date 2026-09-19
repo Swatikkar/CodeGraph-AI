@@ -123,5 +123,25 @@ Implemented fix:
 | Check | Result |
 | --- | --- |
 | Targeted backend suite after hotfix | 5/5 passed |
-| Render startup | Pending redeployment |
-| Public `/api/ready` | Pending redeployment |
+| Render startup | Passed; deploy completed in 55.0 s |
+| Public `/api/ready` | HTTP 200 with database ready |
+
+## Live deterministic-ingestion optimization — 2026-09-19
+
+The same public 17-file Django repository was ingested before and after removing per-code-unit LLM commenting from the default pipeline. Both measurements use production project timestamps (`created_at` to final `ready` update) in the same Render/Supabase deployment.
+
+| Metric | Before | After | Change |
+| --- | ---: | ---: | ---: |
+| Production ingestion duration | 202.4 s | 38.4 s | **81.0% faster** |
+| LLM commenting calls | Multiple per file/code unit | 0 | Removed from default ingestion path |
+| Source mutation during ingestion | Possible | Disabled | Original source preserved |
+| Backend regression tests | 5 passed | 6 passed | Added source-preservation coverage |
+
+Observed baseline provider waste included repeated Groq `404 model_not_found` responses and a Gemini quota failure that consumed 33.81 seconds before fallback. The optimized pipeline still permits one optional architecture-model request, falls back to deterministic Mermaid when no provider is available, and keeps embedding/retrieval behavior intact.
+
+Post-deployment acceptance results:
+
+- Render commit `61d12d2` deployed live in 58.5 seconds.
+- Public health and database readiness returned HTTP 200 with request IDs.
+- Signup, login, authenticated identity, Git clone, durable project status, project structure, ingestion, and chat all passed.
+- Chat returned a project tool result, a terminal `done` event, and no error event.
