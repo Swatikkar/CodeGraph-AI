@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import axios from "axios";
 import mermaid from "mermaid";
@@ -270,7 +270,10 @@ export default function Workspace() {
   const [chatMessages, setChatMessages] = useState([]);
   const [chatInput, setChatInput] = useState("");
   const [imageFile, setImageFile] = useState(null);
-  const [imagePreviewUrl, setImagePreviewUrl] = useState("");
+  const imagePreviewUrl = useMemo(
+    () => (imageFile ? URL.createObjectURL(imageFile) : ""),
+    [imageFile],
+  );
   const [isChatting, setIsChatting] = useState(false);
   const [patchPreview, setPatchPreview] = useState(null);
   const [patchStatus, setPatchStatus] = useState("");
@@ -300,14 +303,10 @@ export default function Workspace() {
   }, [chatMessages]);
 
   useEffect(() => {
-    if (!imageFile) {
-      setImagePreviewUrl("");
-      return undefined;
-    }
-    const url = URL.createObjectURL(imageFile);
-    setImagePreviewUrl(url);
-    return () => URL.revokeObjectURL(url);
-  }, [imageFile]);
+    return () => {
+      if (imagePreviewUrl) URL.revokeObjectURL(imagePreviewUrl);
+    };
+  }, [imagePreviewUrl]);
 
   const handleImageSelect = (file) => {
     if (!file || !file.type.startsWith("image/")) return;

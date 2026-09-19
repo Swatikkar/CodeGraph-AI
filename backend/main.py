@@ -1,9 +1,14 @@
-import base64
 import ast
+import base64
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from contextlib import asynccontextmanager
 import json
 import shutil
 import subprocess
+import time
+
+APP_IMPORT_STARTED_AT = time.perf_counter()
+
 import zipfile
 from pathlib import Path
 
@@ -12,11 +17,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from config import settings
 from graph import codegraph_app
-from graph_chat import chat_graph_app
+from graph_chat import chat_graph_app, close_chat_storage
 from providers import model_router
 from tools.file_ops import write_project_file_after_approval
 from tools.ingester import purge_project_from_chroma
@@ -24,6 +30,7 @@ from tools.retriever import invalidate_vectorstore_cache
 from utils.auth import auth_router, get_current_user
 from utils.database import SessionLocal, get_db
 from utils.guardrails import screen_user_prompt, validate_image_upload, validate_zip_upload
+from utils.observability import log_event, request_observability_middleware
 from utils.project_persistence import (
     delete_project_from_db,
     ensure_retrieval_cache,
@@ -50,12 +57,29 @@ from utils.storage import (
     user_upload_root,
     write_status,
 )
+from utils.readiness import critical_config_errors
 
 
 settings.configure_langsmith()
 settings.create_required_directories()
 
-app = FastAPI(title=settings.APP_NAME, version="2.0.0")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    log_event(
+        "application_started",
+        environment=settings.ENVIRONMENT,
+        import_seconds=round(time.perf_counter() - APP_IMPORT_STARTED_AT, 3),
+    )
+    try:
+        yield
+    finally:
+        close_chat_storage()
+        log_event("application_stopped")
+
+
+app = FastAPI(title=settings.APP_NAME, version="2.0.0", lifespan=lifespan)
+app.middleware("http")(request_observability_middleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
@@ -82,22 +106,46 @@ class ChatPayload(BaseModel):
     approval_new_content: str | None = None
 
 
-def sanitize_user_facing_text(text: str, user_id: int | str, slug: str) -> str:
+def public_project_name_for_chat(db: Session, user_id: int | str, slug: str) -> str:
+    if not storage_enabled():
+        return slug
+    try:
+        project = require_project(db, user_id, slug)
+        return project.display_name or slug
+    except Exception:
+        return slug
+
+
+def sanitize_user_facing_text(text: str, user_id: int | str, slug: str, public_name: str | None = None) -> str:
     if not text:
         return text
+    import re
+
     sanitized = str(text)
     namespace = project_namespace(user_id, slug)
+    display_name = public_name or slug
     replacements = {
-        namespace: slug,
-        f"`{namespace}`": f"`{slug}`",
+        f"`user_{namespace}`": f"`{display_name}`",
+        f"`user-{namespace}`": f"`{display_name}`",
+        f"'user_{namespace}'": f"'{display_name}'",
+        f"'user-{namespace}'": f"'{display_name}'",
+        f'"user_{namespace}"': f'"{display_name}"',
+        f'"user-{namespace}"': f'"{display_name}"',
+        f"user_{namespace}": display_name,
+        f"user-{namespace}": display_name,
+        f"`{namespace}`": f"`{display_name}`",
+        f"'{namespace}'": f"'{display_name}'",
+        f'"{namespace}"': f'"{display_name}"',
+        namespace: display_name,
         "Supervisor Agent": "codebase assistant",
         "Debugger Agent": "debugging assistant",
         "CodeGraph AI project": "project",
     }
     for old, new in replacements.items():
         sanitized = sanitized.replace(old, new)
-    sanitized = __import__("re").sub(r"\buser[_-]?\d+[_-][A-Za-z0-9_.-]+\b", slug, sanitized)
-    sanitized = __import__("re").sub(r"\b\d+_[A-Za-z0-9][A-Za-z0-9_.-]*\b", slug, sanitized)
+    escaped_slug = re.escape(slug)
+    sanitized = re.sub(rf"\buser[_-]?\d+[_-]{escaped_slug}\b", display_name, sanitized)
+    sanitized = re.sub(rf"\b\d+_{escaped_slug}\b", display_name, sanitized)
     return sanitized
 
 
@@ -164,6 +212,27 @@ async def health():
         "supabase_storage_enabled": settings.use_supabase_storage,
         "database_configured": bool(settings.DATABASE_URL),
     }
+
+
+@app.get("/api/ready")
+async def readiness(db: Session = Depends(get_db)):
+    config_errors = critical_config_errors()
+    database_ready = False
+    try:
+        db.execute(text("SELECT 1"))
+        database_ready = True
+    except Exception as exc:
+        log_event("readiness_database_failed", error_type=type(exc).__name__)
+
+    if config_errors or not database_ready:
+        log_event(
+            "readiness_failed",
+            config_error_codes=config_errors,
+            database_ready=database_ready,
+        )
+        raise HTTPException(status_code=503, detail="Service dependencies are not ready.")
+
+    return {"status": "ready", "database": "ready"}
 
 
 @app.post("/api/process-zip")
@@ -406,6 +475,7 @@ async def handle_chat_interaction(payload: ChatPayload, current_user=Depends(get
     if storage_enabled():
         materialize_project_from_db(db, current_user.id, slug)
         ensure_retrieval_cache(db, current_user.id, slug)
+    public_project_name = public_project_name_for_chat(db, current_user.id, slug)
     allowed, guardrail_error = screen_user_prompt(payload.query)
     if not allowed:
         raise HTTPException(status_code=400, detail=guardrail_error)
@@ -428,7 +498,12 @@ async def handle_chat_interaction(payload: ChatPayload, current_user=Depends(get
                     yield sse_event("done")
                 return
 
-            input_data = {"project_name": project_id, "messages": [HumanMessage(content=payload.query)], "provider_events": []}
+            input_data = {
+                "project_name": project_id,
+                "public_project_name": public_project_name,
+                "messages": [HumanMessage(content=payload.query)],
+                "provider_events": [],
+            }
             accumulated = ""
             for chunk, _metadata in chat_graph_app.stream(input_data, config=config, stream_mode="messages"):
                 if getattr(chunk, "tool_calls", None):
@@ -455,7 +530,7 @@ async def handle_chat_interaction(payload: ChatPayload, current_user=Depends(get
                     continue
 
                 if chunk.type == "tool":
-                    content = sanitize_user_facing_text(str(chunk.content), current_user.id, slug)
+                    content = sanitize_user_facing_text(str(chunk.content), current_user.id, slug, public_project_name)
                     print(f"[tool-call] result {getattr(chunk, 'name', 'tool')} chars={len(content)}", flush=True)
                     for source in sorted(set(__import__("re").findall(r"File: ([^)\n,]+)", content))):
                         yield sse_event("reference", path=source)
@@ -466,7 +541,7 @@ async def handle_chat_interaction(payload: ChatPayload, current_user=Depends(get
                     continue
 
                 if chunk.type == "ai" and chunk.content:
-                    content = sanitize_user_facing_text(normalize_ai_content(chunk.content), current_user.id, slug)
+                    content = sanitize_user_facing_text(normalize_ai_content(chunk.content), current_user.id, slug, public_project_name)
                     if "ROUTE_TO_DEBUGGER" in content:
                         continue
                     if re_search_tool_leak(content):
@@ -496,6 +571,7 @@ async def handle_chat_interaction(payload: ChatPayload, current_user=Depends(get
                             normalize_ai_content(message.content),
                             current_user.id,
                             slug,
+                            public_project_name,
                         )
                         if "ROUTE_TO_DEBUGGER" not in final_content and final_content not in accumulated:
                             accumulated += final_content

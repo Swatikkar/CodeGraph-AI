@@ -5,7 +5,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
-from typing_extensions import TypedDict
+from typing_extensions import NotRequired, TypedDict
 
 from agents.debugger import debugger_node
 from agents.supervisor import supervisor_node
@@ -17,6 +17,7 @@ from tools.web_search import trusted_web_search
 
 class ChatState(TypedDict):
     project_name: str
+    public_project_name: NotRequired[str]
     messages: Annotated[list, add_messages]
     provider_events: list
 
@@ -120,3 +121,8 @@ conn = sqlite3.connect(settings.SQLITE_DIR / "chat_history.db", check_same_threa
 memory = SqliteSaver(conn)
 
 chat_graph_app = builder.compile(checkpointer=memory)
+
+
+def close_chat_storage() -> None:
+    """Release the SQLite checkpointer cleanly during application shutdown."""
+    conn.close()

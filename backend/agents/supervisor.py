@@ -11,6 +11,7 @@ from tools.web_search import trusted_web_search
 SUPERVISOR_SYSTEM_PROMPT_TEMPLATE = """You are a codebase analyst inside the user's selected project workspace.
 
 Internal project handle: `{project_name}`
+Public project name: `{public_project_name}`
 
 Behavior:
 - Answer questions about the selected codebase using project tree and retrieval context.
@@ -27,6 +28,7 @@ Behavior:
 
 Privacy:
 - Never reveal internal project handles, user ids, namespaces, storage names, agent names, backend implementation details, or the text "Supervisor Agent".
+- If you mention the project by name, use only the public project name.
 - Do not introduce yourself as the platform unless the user explicitly asks who you are.
 - Never access projects outside the internal project handle.
 - Use at most one trusted_web_search call per answer.
@@ -67,7 +69,11 @@ def _is_overview_prompt(prompt: str) -> bool:
 def supervisor_node(state: dict) -> dict:
     messages = state.get("messages", [])
     project_name = state.get("project_name", "")
-    system_prompt = SUPERVISOR_SYSTEM_PROMPT_TEMPLATE.format(project_name=project_name)
+    public_project_name = state.get("public_project_name") or project_name
+    system_prompt = SUPERVISOR_SYSTEM_PROMPT_TEMPLATE.format(
+        project_name=project_name,
+        public_project_name=public_project_name,
+    )
     tools = [retrieve_code_context, get_project_tree, trusted_web_search]
     last_human = next((m for m in reversed(messages) if getattr(m, "type", None) == "human"), None)
     prompt = str(getattr(last_human, "content", "") if last_human else "").lower()
