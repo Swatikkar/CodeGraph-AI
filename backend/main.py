@@ -3,13 +3,13 @@ import base64
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from contextlib import asynccontextmanager
 import json
+import os
 import shutil
 import subprocess
 import time
 
 APP_IMPORT_STARTED_AT = time.perf_counter()
 
-import zipfile
 from pathlib import Path
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, UploadFile
@@ -30,6 +30,12 @@ from tools.retriever import invalidate_vectorstore_cache
 from utils.auth import auth_router, get_current_user
 from utils.database import SessionLocal, get_db
 from utils.guardrails import screen_user_prompt, validate_image_upload, validate_zip_upload
+from utils.ingestion_security import (
+    IngestionValidationError,
+    safe_extract_zip,
+    validate_git_repo_url,
+    validate_repository_tree,
+)
 from utils.observability import log_event, request_observability_middleware
 from utils.project_persistence import (
     delete_project_from_db,
@@ -191,17 +197,6 @@ def run_pipeline_in_background(user_id: str, project_name: str):
             print(f"[persistence] warning: failed to persist project snapshot: {exc}", flush=True)
 
 
-def safe_extract_zip(zip_path: Path, destination: Path):
-    destination = destination.resolve()
-    with zipfile.ZipFile(zip_path) as archive:
-        for member in archive.infolist():
-            member_path = Path(member.filename)
-            target = (destination / member_path).resolve()
-            if member_path.is_absolute() or not target.is_relative_to(destination):
-                raise HTTPException(status_code=400, detail="ZIP archive contains an unsafe file path.")
-        archive.extractall(destination)
-
-
 @app.get("/api/health")
 async def health():
     return {
@@ -274,17 +269,28 @@ async def process_zip_upload(
             shutil.rmtree(root)
         with zip_path.open("wb") as handle:
             shutil.copyfileobj(file.file, handle)
-        safe_extract_zip(zip_path, root)
+        archive_stats = safe_extract_zip(zip_path, root)
         zip_path.unlink(missing_ok=True)
+        log_event(
+            "zip_extracted",
+            user_id=str(current_user.id),
+            project_name=slug,
+            **archive_stats,
+        )
         write_status(current_user.id, slug, "processing", "extract", f"Project '{slug}' uploaded.", 5)
-    except HTTPException:
+    except IngestionValidationError as exc:
         zip_path.unlink(missing_ok=True)
         if root.exists():
             shutil.rmtree(root, ignore_errors=True)
-        delete_project_artifacts(current_user.id, slug)
-        raise
+        write_status(current_user.id, slug, "error", "extract", "ZIP upload was rejected.", 0, str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to handle file upload: {exc}") from exc
+        zip_path.unlink(missing_ok=True)
+        if root.exists():
+            shutil.rmtree(root, ignore_errors=True)
+        write_status(current_user.id, slug, "error", "extract", "ZIP upload failed.", 0, type(exc).__name__)
+        log_event("zip_extraction_failed", user_id=str(current_user.id), project_name=slug, error_type=type(exc).__name__)
+        raise HTTPException(status_code=500, detail="Failed to handle ZIP upload.") from exc
 
     background_tasks.add_task(run_pipeline_in_background, str(current_user.id), slug)
     return {"status": "processing", "project_name": slug, "message": f"Project '{slug}' uploaded successfully."}
@@ -298,6 +304,10 @@ async def process_git_repo(
     db: Session = Depends(get_db),
 ):
     slug = slugify_project_name(payload.project_name)
+    try:
+        repository_url = validate_git_repo_url(payload.repo_url)
+    except IngestionValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if storage_enabled():
         try:
             project = upsert_project(
@@ -306,7 +316,7 @@ async def process_git_repo(
                 slug,
                 payload.project_name.strip(),
                 "git",
-                payload.repo_url,
+                repository_url,
                 status="processing",
                 stage="clone",
                 message=f"Repository clone started as '{slug}'.",
@@ -325,19 +335,54 @@ async def process_git_repo(
         shutil.rmtree(root)
 
     try:
+        clone_environment = os.environ.copy()
+        clone_environment["GIT_TERMINAL_PROMPT"] = "0"
+        clone_environment["GIT_CONFIG_NOSYSTEM"] = "1"
         result = subprocess.run(
-            ["git", "clone", "--depth", "1", payload.repo_url, str(root)],
+            [
+                "git", "-c", "protocol.file.allow=never", "clone",
+                "--depth", "1", "--single-branch", "--no-tags",
+                repository_url, str(root),
+            ],
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=settings.GIT_CLONE_TIMEOUT_SECONDS,
+            env=clone_environment,
         )
         if result.returncode != 0:
-            raise HTTPException(status_code=400, detail=result.stderr.strip() or "Failed to clone git repository.")
+            log_event(
+                "git_clone_failed",
+                user_id=str(current_user.id),
+                project_name=slug,
+                return_code=result.returncode,
+                git_error=(result.stderr.strip() or "unknown")[-500:],
+            )
+            raise IngestionValidationError("Repository could not be cloned. Confirm that it is public and the URL is correct.")
+        repository_stats = validate_repository_tree(root)
+        shutil.rmtree(root / ".git", ignore_errors=True)
+        log_event(
+            "git_clone_completed",
+            user_id=str(current_user.id),
+            project_name=slug,
+            **repository_stats,
+        )
         write_status(current_user.id, slug, "processing", "clone", f"Repository cloned as '{slug}'.", 5)
-    except HTTPException:
-        raise
+    except subprocess.TimeoutExpired as exc:
+        if root.exists():
+            shutil.rmtree(root, ignore_errors=True)
+        write_status(current_user.id, slug, "error", "clone", "Repository clone timed out.", 0, "clone_timeout")
+        raise HTTPException(status_code=504, detail="Repository clone timed out.") from exc
+    except IngestionValidationError as exc:
+        if root.exists():
+            shutil.rmtree(root, ignore_errors=True)
+        write_status(current_user.id, slug, "error", "clone", "Repository clone was rejected.", 0, str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to clone repository: {exc}") from exc
+        if root.exists():
+            shutil.rmtree(root, ignore_errors=True)
+        write_status(current_user.id, slug, "error", "clone", "Repository clone failed.", 0, type(exc).__name__)
+        log_event("git_clone_exception", user_id=str(current_user.id), project_name=slug, error_type=type(exc).__name__)
+        raise HTTPException(status_code=500, detail="Failed to clone repository.") from exc
 
     background_tasks.add_task(run_pipeline_in_background, str(current_user.id), slug)
     return {"status": "processing", "project_name": slug, "message": "Repository cloned successfully."}

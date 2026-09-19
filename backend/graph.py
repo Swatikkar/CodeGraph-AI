@@ -53,7 +53,10 @@ def scanner_node(state: GraphState):
         scanned_files = scan_result["total_files"]
         print(
             f"[ingestion] scanned {scanned_files} files for "
-            f"{state['user_id']}/{state['project_name']}",
+            f"{state['user_id']}/{state['project_name']} "
+            f"selected_bytes={scan_result['selected_bytes']} "
+            f"skipped={scan_result['skipped_files']} "
+            f"skip_reasons={scan_result['skip_reasons']}",
             flush=True,
         )
         write_ingestion_report(

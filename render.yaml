@@ -31,10 +31,26 @@ services:
         value: "3"
       - key: WEB_SEARCH_TIMEOUT_SECONDS
         value: "8"
+      - key: ALLOWED_GIT_HOSTS
+        value: github.com
+      - key: GIT_CLONE_TIMEOUT_SECONDS
+        value: "120"
       - key: MAX_ZIP_BYTES
-        value: "1073741824"
+        value: "25000000"
+      - key: MAX_ZIP_EXTRACTED_BYTES
+        value: "100000000"
+      - key: MAX_ZIP_FILES
+        value: "2000"
+      - key: MAX_ARCHIVE_PATH_LENGTH
+        value: "240"
+      - key: MAX_ARCHIVE_DEPTH
+        value: "20"
+      - key: MAX_ZIP_COMPRESSION_RATIO
+        value: "100"
       - key: MAX_PROJECT_FILES
         value: "300"
+      - key: MAX_PROJECT_SOURCE_BYTES
+        value: "25000000"
       - key: MAX_FILE_BYTES
         value: "350000"
       - key: MAX_IMAGE_BYTES
@@ -82,4 +98,6 @@ services:
       - key: VITE_API_URL
         sync: false
       - key: VITE_MAX_ZIP_BYTES
-        value: "1073741824"
+        value: "25000000"
+      - key: VITE_HOSTED_ZIP_TARGET_BYTES
+        value: "20000000"

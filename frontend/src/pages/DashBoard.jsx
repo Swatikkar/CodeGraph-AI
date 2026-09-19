@@ -93,12 +93,12 @@ export default function Dashboard() {
 
   const pollIntervalRef = useRef(null);
   const isPollingRef = useRef(false);
-  const configuredMaxZipBytes = Number(import.meta.env.VITE_MAX_ZIP_BYTES || 1073741824);
+  const configuredMaxZipBytes = Number(import.meta.env.VITE_MAX_ZIP_BYTES || 25_000_000);
   const hostedZipTargetBytes = Number(
-    import.meta.env.VITE_HOSTED_ZIP_TARGET_BYTES || 80 * 1024 * 1024,
+    import.meta.env.VITE_HOSTED_ZIP_TARGET_BYTES || 20_000_000,
   );
-  // Keep the client-side guard aligned with the backend's 1 GB archive limit.
-  const maxZipBytes = Math.max(configuredMaxZipBytes, 1073741824);
+  // The server remains authoritative; this avoids uploading a file it will reject.
+  const maxZipBytes = configuredMaxZipBytes;
   const maxZipLabel =
     maxZipBytes >= 1024 * 1024 * 1024
       ? `${Math.round(maxZipBytes / 1024 / 1024 / 1024)} GB`

@@ -11,6 +11,19 @@ IGNORE_DIRS = {
     ".vscode", ".idea", "dist", "build", ".next", ".pytest_cache",
 }
 
+IGNORE_FILENAMES = {
+    ".env", ".npmrc", ".pypirc", ".netrc", "credentials", "credentials.json",
+    "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "secrets.json",
+}
+
+SUPPORTED_SOURCE_EXTS = {
+    ".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".go", ".rb", ".rs",
+    ".c", ".h", ".cpp", ".hpp", ".cs", ".php", ".swift", ".kt", ".kts",
+    ".scala", ".sh", ".bash", ".sql",
+}
+
+SUPPORTED_SOURCE_FILENAMES = {"dockerfile", "makefile", "procfile"}
+
 IGNORE_EXTS = {
     ".pyc", ".png", ".jpg", ".jpeg", ".svg", ".ico", ".pdf", ".zip",
     ".sqlite3", ".db", ".exe", ".bin", ".mp4", ".json", ".jsonc", ".css",
@@ -113,9 +126,17 @@ class Settings(BaseSettings):
     LANGSMITH_PROJECT: str = "CodeGraph_AI"
     LANGSMITH_ENDPOINT: str = "https://apac.api.smith.langchain.com"
 
+    ALLOWED_GIT_HOSTS: str = "github.com"
+    GIT_CLONE_TIMEOUT_SECONDS: int = 120
     MAX_PROJECT_FILES: int = 300
+    MAX_PROJECT_SOURCE_BYTES: int = 25_000_000
     MAX_FILE_BYTES: int = 350_000
-    MAX_ZIP_BYTES: int = 1_073_741_824
+    MAX_ZIP_BYTES: int = 25_000_000
+    MAX_ZIP_EXTRACTED_BYTES: int = 100_000_000
+    MAX_ZIP_FILES: int = 2_000
+    MAX_ARCHIVE_PATH_LENGTH: int = 240
+    MAX_ARCHIVE_DEPTH: int = 20
+    MAX_ZIP_COMPRESSION_RATIO: float = 100.0
     MAX_IMAGE_BYTES: int = 5_000_000
     ALLOWED_IMAGE_TYPES: set[str] = {"image/png", "image/jpeg", "image/webp"}
 
@@ -142,6 +163,10 @@ class Settings(BaseSettings):
     @property
     def cors_origins(self) -> list[str]:
         return [origin.strip() for origin in self.BACKEND_CORS_ORIGINS.split(",") if origin.strip()]
+
+    @property
+    def allowed_git_hosts(self) -> set[str]:
+        return {host.strip().lower() for host in self.ALLOWED_GIT_HOSTS.split(",") if host.strip()}
 
     def configure_langsmith(self):
         if self.LANGSMITH_API_KEY and self.LANGSMITH_TRACING:
