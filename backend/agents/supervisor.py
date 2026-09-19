@@ -66,6 +66,16 @@ def _is_overview_prompt(prompt: str) -> bool:
     return any(marker in normalized for marker in OVERVIEW_MARKERS)
 
 
+def _ensure_file_references(response: AIMessage, context: str) -> AIMessage:
+    file_paths = list(dict.fromkeys(re.findall(r"File: ([^,\n)]+)", context)))[:5]
+    content = str(response.content or "")
+    missing_paths = [path for path in file_paths if path not in content]
+    if missing_paths:
+        suffix = "\n\nRelevant files: " + ", ".join(f"`{path}`" for path in missing_paths)
+        response.content = content + suffix
+    return response
+
+
 def supervisor_node(state: dict) -> dict:
     messages = state.get("messages", [])
     project_name = state.get("project_name", "")
@@ -84,12 +94,10 @@ def supervisor_node(state: dict) -> dict:
         "component", "architecture", "dependency", "import", "map.js", "pathbutton",
         "app", "repo", "repository", "overview", "purpose", "use case", "use cases",
     ]
-    external_markers = [
+    external_intent_markers = [
         "latest", "current", "update", "updated", "version", "release", "migration",
         "migrate", "deprecated", "deprecation", "breaking change", "changelog",
-        "docs", "documentation", "official", "compare", "next js", "next.js",
-        "react", "vite", "fastapi", "langchain", "pydantic", "sqlalchemy",
-        "import changed", "new method", "new api", "library",
+        "docs", "documentation", "official", "compare", "import changed", "new method", "new api",
     ]
     direct_markers = ["reply with exactly", "say exactly", "stream ok"]
     debugger_markers = [
@@ -97,7 +105,7 @@ def supervisor_node(state: dict) -> dict:
         "cannot read properties", "undefined", "crash", "failing", "broken",
     ]
     should_use_retrieval = last_human and (is_overview_prompt or any(marker in prompt for marker in code_markers))
-    should_use_search = last_human and any(marker in prompt for marker in external_markers)
+    should_use_search = last_human and any(marker in prompt for marker in external_intent_markers)
     is_direct_prompt = (
         any(marker in prompt for marker in direct_markers)
         or prompt.strip() in {"hello", "hi", "hey"}
@@ -105,6 +113,24 @@ def supervisor_node(state: dict) -> dict:
     if last_human and not is_direct_prompt and any(marker in prompt for marker in debugger_markers):
         print("[agent-router] Supervisor routed query to Debugger Agent", flush=True)
         return {"messages": [AIMessage(content="ROUTE_TO_DEBUGGER")], "provider_events": []}
+
+    if should_use_retrieval and not should_use_search and not is_overview_prompt and not is_direct_prompt:
+        context = retrieve_code_context.invoke({
+            "query": str(last_human.content),
+            "project_name": project_name,
+            "top_n": 5,
+        })
+        response, metadata = model_router.invoke_chat(
+            "supervisor_reasoning",
+            [
+                SystemMessage(content=system_prompt + "\nUse the provided context and cite relevant file paths."),
+                HumanMessage(content=f"User question:\n{last_human.content}\n\nRetrieved context:\n{context}"),
+            ],
+        )
+        return {
+            "messages": [_ensure_file_references(response, context)],
+            "provider_events": [metadata],
+        }
 
     if is_overview_prompt and not is_direct_prompt:
         tree = get_project_tree.invoke({"project_name": project_name})
@@ -135,7 +161,7 @@ def supervisor_node(state: dict) -> dict:
                 ),
             ],
         )
-        return {"messages": [response], "provider_events": [metadata]}
+        return {"messages": [_ensure_file_references(response, context)], "provider_events": [metadata]}
 
     should_use_tools = (should_use_retrieval or should_use_search) and not is_direct_prompt
     has_tool_results = any(getattr(message, "type", None) == "tool" for message in messages)
@@ -166,6 +192,7 @@ def supervisor_node(state: dict) -> dict:
         last_human
         and should_use_tools
         and should_use_retrieval
+        and not has_tool_results
         and not getattr(response, "tool_calls", None)
         and any(marker in str(last_human.content).lower() for marker in code_markers)
     )

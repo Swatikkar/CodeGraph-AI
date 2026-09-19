@@ -22,9 +22,11 @@ os.environ.update({
 
 from fastapi.testclient import TestClient
 from fastapi import HTTPException
+from langchain_core.messages import AIMessage, HumanMessage
 
 from agents.commenter import commenter_node
 from agents.architect import architect_node
+from agents.supervisor import supervisor_node
 from providers.local_embeddings import LocalHashingEmbeddings
 from providers.router import ModelRouter
 from config import settings
@@ -157,6 +159,28 @@ class HealthEndpointTests(unittest.TestCase):
         invoke_text.assert_not_called()
         report = json.loads(report_file.read_text(encoding="utf-8"))
         self.assertEqual(report["architecture_model"]["provider"], "deterministic")
+
+    def test_local_code_question_uses_one_model_call_and_keeps_file_references(self):
+        context = "--- Context Block 1 (File: main.py, Language: py) ---\napp = FastAPI()"
+        with (
+            patch("agents.supervisor.retrieve_code_context") as retrieve,
+            patch(
+                "agents.supervisor.model_router.invoke_chat",
+                return_value=(AIMessage(content="The FastAPI application is defined in the retrieved entrypoint."), {"provider": "groq"}),
+            ) as invoke_chat,
+        ):
+            retrieve.invoke.return_value = context
+            result = supervisor_node({
+                "project_name": "user_project",
+                "public_project_name": "project",
+                "messages": [HumanMessage(content="Which file defines the FastAPI application?")],
+                "provider_events": [],
+            })
+
+        retrieve.invoke.assert_called_once()
+        invoke_chat.assert_called_once()
+        self.assertNotIn("tools", invoke_chat.call_args.kwargs)
+        self.assertIn("`main.py`", result["messages"][0].content)
 
     def test_durable_reservation_rejects_processing_and_allows_terminal_retry(self):
         user_id = "duplicate-test-user"

@@ -116,6 +116,7 @@ class ModelRouter:
                 google_api_key=settings.GEMINI_API_KEY,
                 temperature=settings.MODEL_TEMPERATURE,
                 timeout=settings.PROVIDER_TIMEOUT_SECONDS,
+                max_retries=settings.PROVIDER_MAX_RETRIES,
             )
         elif provider in {"openrouter", "nvidia"}:
             api_key = settings.OPENROUTER_API_KEY if provider == "openrouter" else settings.NVIDIA_API_KEY
