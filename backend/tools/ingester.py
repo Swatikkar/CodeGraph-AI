@@ -62,12 +62,20 @@ def get_splitter_for_file(file_path: str) -> RecursiveCharacterTextSplitter:
         )
 
 
-def ingest_to_chroma(files_to_process: list, project_name: str, project_root: str | None = None, user_id: int | str | None = None):
+def ingest_to_chroma(
+    files_to_process: list,
+    project_name: str,
+    project_root: str | None = None,
+    user_id: int | str | None = None,
+    replace_existing: bool = True,
+):
     """
     Reads physical code files, chunks them using language-aware splitting,
     and embeds them into a Chroma vector store.
     """
     print(f"\nStarting vector ingestion for {project_name}...")
+    if replace_existing:
+        purge_project_from_chroma(project_name, strict=True)
 
     all_chunks = []
 
@@ -136,7 +144,7 @@ def ingest_to_chroma(files_to_process: list, project_name: str, project_root: st
     return len(all_chunks)
 
 
-def purge_project_from_chroma(project_name: str):
+def purge_project_from_chroma(project_name: str, strict: bool = False) -> bool:
     """Remove a project's Chroma store, including Windows-locked SQLite files."""
     try:
         project_db_path = settings.CHROMA_DB_DIR / project_name
@@ -149,7 +157,7 @@ def purge_project_from_chroma(project_name: str):
                 try:
                     shutil.rmtree(project_db_path, onerror=remove_readonly)
                     print(f"Deleted vector database for {project_name}")
-                    return
+                    return True
                 except Exception as exc:
                     last_error = exc
                     gc.collect()
@@ -157,6 +165,10 @@ def purge_project_from_chroma(project_name: str):
             raise RuntimeError(f"Could not delete Chroma directory after retries: {last_error}")
         else:
             print(f"No vector database found at {project_db_path}")
+            return True
 
     except Exception as e:
         print(f"Warning: Failed to execute purge routine: {str(e)}")
+        if strict:
+            raise
+        return False

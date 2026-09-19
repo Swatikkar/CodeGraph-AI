@@ -21,6 +21,8 @@ os.environ.update({
 })
 
 from config import settings
+from main import release_local_ingestion_slot, reserve_local_ingestion_slot
+from tools.ingester import purge_project_from_chroma
 from tools.scanner import get_codebase_map
 from utils.ingestion_security import (
     IngestionValidationError,
@@ -172,6 +174,30 @@ class ScannerBoundaryTests(unittest.TestCase):
         self.assertEqual(result["total_files"], 1)
         self.assertEqual(result["selected_bytes"], 4)
         self.assertEqual(result["skip_reasons"]["project_byte_limit"], 1)
+
+
+class DuplicateIngestionTests(unittest.TestCase):
+    def test_local_slot_blocks_same_project_until_release(self):
+        self.assertTrue(reserve_local_ingestion_slot("user", "same-project"))
+        try:
+            self.assertFalse(reserve_local_ingestion_slot("user", "same-project"))
+            self.assertTrue(reserve_local_ingestion_slot("other-user", "same-project"))
+            release_local_ingestion_slot("other-user", "same-project")
+        finally:
+            release_local_ingestion_slot("user", "same-project")
+
+        self.assertTrue(reserve_local_ingestion_slot("user", "same-project"))
+        release_local_ingestion_slot("user", "same-project")
+
+    def test_vectorstore_replacement_removes_previous_index(self):
+        namespace = "test_replace_vectors"
+        vector_path = settings.CHROMA_DB_DIR / namespace
+        vector_path.mkdir(parents=True, exist_ok=True)
+        stale_file = vector_path / "stale.txt"
+        stale_file.write_text("old source that must not remain")
+
+        self.assertTrue(purge_project_from_chroma(namespace, strict=True))
+        self.assertFalse(vector_path.exists())
 
 
 if __name__ == "__main__":

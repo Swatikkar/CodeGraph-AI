@@ -19,11 +19,14 @@ os.environ.update({
 })
 
 from fastapi.testclient import TestClient
+from fastapi import HTTPException
 
 from agents.commenter import commenter_node
 from config import settings
 from main import app
-from utils.database import build_engine_options, engine
+from models.user import ProjectModel
+from utils.database import SessionLocal, build_engine_options, engine
+from utils.project_persistence import reserve_project_ingestion
 from utils.readiness import critical_config_errors
 
 
@@ -101,6 +104,31 @@ class HealthEndpointTests(unittest.TestCase):
         self.assertEqual(source_path.read_text(encoding="utf-8"), original)
         self.assertEqual(result["processed_files"], [str(source_path)])
         self.assertEqual(result["comment_report"][0]["status"], "preserved_original")
+
+    def test_durable_reservation_rejects_processing_and_allows_terminal_retry(self):
+        user_id = "duplicate-test-user"
+        slug = "duplicate-project"
+        db = SessionLocal()
+        try:
+            db.query(ProjectModel).filter(ProjectModel.user_id == user_id, ProjectModel.slug == slug).delete()
+            db.commit()
+            first = reserve_project_ingestion(db, user_id, slug, "Duplicate Project", "git")
+            self.assertEqual(first.status, "processing")
+
+            with self.assertRaises(HTTPException) as conflict:
+                reserve_project_ingestion(db, user_id, slug, "Duplicate Project", "git")
+            self.assertEqual(conflict.exception.status_code, 409)
+
+            first.status = "error"
+            db.commit()
+            retried = reserve_project_ingestion(db, user_id, slug, "Duplicate Project", "git")
+            self.assertEqual(retried.status, "processing")
+            self.assertIsNone(retried.error)
+        finally:
+            db.rollback()
+            db.query(ProjectModel).filter(ProjectModel.user_id == user_id, ProjectModel.slug == slug).delete()
+            db.commit()
+            db.close()
 
 
 if __name__ == "__main__":

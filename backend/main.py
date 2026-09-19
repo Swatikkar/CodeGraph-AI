@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import subprocess
+import threading
 import time
 
 APP_IMPORT_STARTED_AT = time.perf_counter()
@@ -46,8 +47,8 @@ from utils.project_persistence import (
     persist_project_snapshot,
     read_chat_messages,
     require_project,
+    reserve_project_ingestion,
     storage_enabled,
-    upsert_project,
 )
 from utils.storage import (
     architecture_path,
@@ -96,6 +97,8 @@ app.add_middleware(
 app.include_router(auth_router)
 
 _vision_executor = ThreadPoolExecutor(max_workers=2)
+_active_ingestions: set[tuple[str, str]] = set()
+_active_ingestions_lock = threading.Lock()
 
 
 class GitRepoPayload(BaseModel):
@@ -110,6 +113,21 @@ class ChatPayload(BaseModel):
     is_approval: bool = False
     approval_file_path: str | None = None
     approval_new_content: str | None = None
+
+
+def reserve_local_ingestion_slot(user_id: int | str, project_name: str) -> bool:
+    key = (str(user_id), slugify_project_name(project_name))
+    with _active_ingestions_lock:
+        if key in _active_ingestions:
+            return False
+        _active_ingestions.add(key)
+        return True
+
+
+def release_local_ingestion_slot(user_id: int | str, project_name: str) -> None:
+    key = (str(user_id), slugify_project_name(project_name))
+    with _active_ingestions_lock:
+        _active_ingestions.discard(key)
 
 
 def public_project_name_for_chat(db: Session, user_id: int | str, slug: str) -> str:
@@ -195,6 +213,7 @@ def run_pipeline_in_background(user_id: str, project_name: str):
             persist_project_snapshot(user_id, project_name)
         except Exception as exc:
             print(f"[persistence] warning: failed to persist project snapshot: {exc}", flush=True)
+        release_local_ingestion_slot(user_id, project_name)
 
 
 @app.get("/api/health")
@@ -240,31 +259,34 @@ async def process_zip_upload(
 ):
     await validate_zip_upload(file)
     slug = slugify_project_name(project_name)
+    if not reserve_local_ingestion_slot(current_user.id, slug):
+        raise HTTPException(status_code=409, detail="This project is already being ingested.")
     if storage_enabled():
         try:
-            project = upsert_project(
+            project = reserve_project_ingestion(
                 db,
                 current_user.id,
                 slug,
                 project_name.strip(),
                 "zip",
-                status="processing",
                 stage="upload",
                 message=f"Project '{slug}' upload started.",
-                progress=1,
             )
             print(
                 f"[persistence] project row ready id={project.id} user={current_user.id} slug={slug} source=zip",
                 flush=True,
             )
         except Exception as exc:
+            release_local_ingestion_slot(current_user.id, slug)
             print(f"[persistence] failed to create project row user={current_user.id} slug={slug}: {exc}", flush=True)
+            if isinstance(exc, HTTPException):
+                raise
             raise HTTPException(status_code=500, detail="Failed to create durable project record.") from exc
-    ensure_project_dirs(current_user.id, slug)
-    root = project_root(current_user.id, slug)
-    zip_path = user_upload_root(current_user.id) / f"{slug}.zip"
 
     try:
+        ensure_project_dirs(current_user.id, slug)
+        root = project_root(current_user.id, slug)
+        zip_path = user_upload_root(current_user.id) / f"{slug}.zip"
         if root.exists():
             shutil.rmtree(root)
         with zip_path.open("wb") as handle:
@@ -283,13 +305,16 @@ async def process_zip_upload(
         if root.exists():
             shutil.rmtree(root, ignore_errors=True)
         write_status(current_user.id, slug, "error", "extract", "ZIP upload was rejected.", 0, str(exc))
+        release_local_ingestion_slot(current_user.id, slug)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
-        zip_path.unlink(missing_ok=True)
-        if root.exists():
+        if "zip_path" in locals():
+            zip_path.unlink(missing_ok=True)
+        if "root" in locals() and root.exists():
             shutil.rmtree(root, ignore_errors=True)
         write_status(current_user.id, slug, "error", "extract", "ZIP upload failed.", 0, type(exc).__name__)
         log_event("zip_extraction_failed", user_id=str(current_user.id), project_name=slug, error_type=type(exc).__name__)
+        release_local_ingestion_slot(current_user.id, slug)
         raise HTTPException(status_code=500, detail="Failed to handle ZIP upload.") from exc
 
     background_tasks.add_task(run_pipeline_in_background, str(current_user.id), slug)
@@ -308,33 +333,36 @@ async def process_git_repo(
         repository_url = validate_git_repo_url(payload.repo_url)
     except IngestionValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not reserve_local_ingestion_slot(current_user.id, slug):
+        raise HTTPException(status_code=409, detail="This project is already being ingested.")
     if storage_enabled():
         try:
-            project = upsert_project(
+            project = reserve_project_ingestion(
                 db,
                 current_user.id,
                 slug,
                 payload.project_name.strip(),
                 "git",
                 repository_url,
-                status="processing",
                 stage="clone",
                 message=f"Repository clone started as '{slug}'.",
-                progress=1,
             )
             print(
                 f"[persistence] project row ready id={project.id} user={current_user.id} slug={slug} source=git",
                 flush=True,
             )
         except Exception as exc:
+            release_local_ingestion_slot(current_user.id, slug)
             print(f"[persistence] failed to create project row user={current_user.id} slug={slug}: {exc}", flush=True)
+            if isinstance(exc, HTTPException):
+                raise
             raise HTTPException(status_code=500, detail="Failed to create durable project record.") from exc
-    ensure_project_dirs(current_user.id, slug)
-    root = project_root(current_user.id, slug)
-    if root.exists():
-        shutil.rmtree(root)
 
     try:
+        ensure_project_dirs(current_user.id, slug)
+        root = project_root(current_user.id, slug)
+        if root.exists():
+            shutil.rmtree(root)
         clone_environment = os.environ.copy()
         clone_environment["GIT_TERMINAL_PROMPT"] = "0"
         clone_environment["GIT_CONFIG_NOSYSTEM"] = "1"
@@ -371,17 +399,20 @@ async def process_git_repo(
         if root.exists():
             shutil.rmtree(root, ignore_errors=True)
         write_status(current_user.id, slug, "error", "clone", "Repository clone timed out.", 0, "clone_timeout")
+        release_local_ingestion_slot(current_user.id, slug)
         raise HTTPException(status_code=504, detail="Repository clone timed out.") from exc
     except IngestionValidationError as exc:
         if root.exists():
             shutil.rmtree(root, ignore_errors=True)
         write_status(current_user.id, slug, "error", "clone", "Repository clone was rejected.", 0, str(exc))
+        release_local_ingestion_slot(current_user.id, slug)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
-        if root.exists():
+        if "root" in locals() and root.exists():
             shutil.rmtree(root, ignore_errors=True)
         write_status(current_user.id, slug, "error", "clone", "Repository clone failed.", 0, type(exc).__name__)
         log_event("git_clone_exception", user_id=str(current_user.id), project_name=slug, error_type=type(exc).__name__)
+        release_local_ingestion_slot(current_user.id, slug)
         raise HTTPException(status_code=500, detail="Failed to clone repository.") from exc
 
     background_tasks.add_task(run_pipeline_in_background, str(current_user.id), slug)

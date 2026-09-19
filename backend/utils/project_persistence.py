@@ -5,6 +5,7 @@ from pathlib import Path
 
 from fastapi import HTTPException
 from langchain_core.documents import Document
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from config import IGNORE_DIRS, IGNORE_EXTS, settings
@@ -64,35 +65,53 @@ def require_project(db: Session, user_id: int | str, slug: str) -> ProjectModel:
     return project
 
 
-def upsert_project(
+def reserve_project_ingestion(
     db: Session,
     user_id: int | str,
     slug: str,
     display_name: str,
     source_type: str,
     source_url: str | None = None,
-    status: str = "processing",
     stage: str = "created",
     message: str | None = None,
-    progress: int = 0,
-    error: str | None = None,
 ) -> ProjectModel:
+    """Atomically reject an active same-slug ingestion and reserve terminal projects for replacement."""
     normalized_user_id = normalize_user_id(user_id)
     slug = slugify_project_name(slug)
-    project = get_project(db, normalized_user_id, slug)
+    project = (
+        db.query(ProjectModel)
+        .filter(ProjectModel.user_id == normalized_user_id, ProjectModel.slug == slug)
+        .with_for_update()
+        .first()
+    )
+    if project and project.status not in {"ready", "error"}:
+        raise HTTPException(status_code=409, detail="This project is already being ingested.")
+
     if not project:
-        project = ProjectModel(user_id=normalized_user_id, slug=slug, display_name=display_name, source_type=source_type)
+        project = ProjectModel(
+            user_id=normalized_user_id,
+            slug=slug,
+            display_name=display_name,
+            source_type=source_type,
+        )
         db.add(project)
 
     project.display_name = display_name
     project.source_type = source_type
     project.source_url = source_url
-    project.status = status
+    project.status = "processing"
     project.stage = stage
     project.message = message
-    project.progress = progress
-    project.error = error
-    db.commit()
+    project.progress = 1
+    project.error = None
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        existing = get_project(db, normalized_user_id, slug)
+        if existing:
+            raise HTTPException(status_code=409, detail="This project is already being ingested.") from exc
+        raise
     db.refresh(project)
     return project
 
