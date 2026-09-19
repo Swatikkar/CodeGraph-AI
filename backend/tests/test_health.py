@@ -1,4 +1,5 @@
 import os
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -23,6 +24,7 @@ from fastapi.testclient import TestClient
 from fastapi import HTTPException
 
 from agents.commenter import commenter_node
+from agents.architect import architect_node
 from providers.local_embeddings import LocalHashingEmbeddings
 from providers.router import ModelRouter
 from config import settings
@@ -127,6 +129,34 @@ class HealthEndpointTests(unittest.TestCase):
             settings.EMBEDDING_MODELS = previous_routes
 
         self.assertIsInstance(embeddings, LocalHashingEmbeddings)
+
+    def test_default_architecture_generation_avoids_llm_calls(self):
+        source_path = TEST_PATH / "architecture_source.py"
+        source_path.write_text("import pathlib\n", encoding="utf-8")
+        architecture_file = TEST_PATH / "architecture.mmd"
+        dependency_file = TEST_PATH / "dependencies.mmd"
+        report_file = TEST_PATH / "ingestion-report.json"
+        previous_setting = settings.ENABLE_LLM_ARCHITECTURE
+        settings.ENABLE_LLM_ARCHITECTURE = False
+        try:
+            with (
+                patch("agents.architect.model_router.invoke_text") as invoke_text,
+                patch("agents.architect.architecture_path", return_value=architecture_file),
+                patch("agents.architect.dependency_graph_path", return_value=dependency_file),
+                patch("agents.architect.ingestion_report_path", return_value=report_file),
+            ):
+                architect_node({
+                    "processed_files": [str(source_path)],
+                    "project_path": str(TEST_PATH),
+                    "user_id": "test-user",
+                    "project_name": "test-project",
+                })
+        finally:
+            settings.ENABLE_LLM_ARCHITECTURE = previous_setting
+
+        invoke_text.assert_not_called()
+        report = json.loads(report_file.read_text(encoding="utf-8"))
+        self.assertEqual(report["architecture_model"]["provider"], "deterministic")
 
     def test_durable_reservation_rejects_processing_and_allows_terminal_retry(self):
         user_id = "duplicate-test-user"

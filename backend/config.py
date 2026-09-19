@@ -99,6 +99,7 @@ class Settings(BaseSettings):
     PROVIDER_MAX_RETRIES: int = 0
     MODEL_TEMPERATURE: float = 0.1
     ENABLE_LLM_CODE_COMMENTING: bool = False
+    ENABLE_LLM_ARCHITECTURE: bool = False
     TRUSTED_SEARCH_DOMAINS: str = (
         "react.dev,nextjs.org,vite.dev,developer.mozilla.org,docs.python.org,"
         "fastapi.tiangolo.com,python.langchain.com,js.langchain.com,"

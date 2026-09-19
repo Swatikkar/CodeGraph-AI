@@ -25,6 +25,8 @@ services:
         value: "0.1"
       - key: ENABLE_LLM_CODE_COMMENTING
         value: "false"
+      - key: ENABLE_LLM_ARCHITECTURE
+        value: "false"
       - key: TRUSTED_SEARCH_DOMAINS
         value: react.dev,nextjs.org,vite.dev,developer.mozilla.org,docs.python.org,fastapi.tiangolo.com,python.langchain.com,js.langchain.com,docs.pydantic.dev,docs.sqlalchemy.org,npmjs.com,pypi.org,github.com
       - key: WEB_SEARCH_MAX_RESULTS

@@ -3,6 +3,7 @@ import os
 import re
 from pathlib import Path
 
+from config import settings
 from providers import model_router
 from utils.storage import architecture_path, dependency_graph_path, ingestion_report_path
 
@@ -109,20 +110,22 @@ def architect_node(state: dict):
         imports = dependency_map.get(relative, [])
         summary_lines.append(f"- {relative}: imports {', '.join(imports[:8]) if imports else 'no major imports'}")
 
-    try:
-        raw, metadata = model_router.invoke_text(
-            "architecture_design",
-            ARCHITECTURE_SYSTEM,
-            "Project file/import summary:\n" + "\n".join(summary_lines),
-        )
-        architecture = (
-            sanitize_mermaid(raw)
-            if metadata.get("provider") != "none"
-            else FALLBACK_ARCHITECTURE
-        )
-    except Exception:
-        metadata = {"provider": "none", "model": "none"}
-        architecture = FALLBACK_ARCHITECTURE
+    metadata = {"provider": "deterministic", "model": "static-analysis"}
+    architecture = FALLBACK_ARCHITECTURE
+    if settings.ENABLE_LLM_ARCHITECTURE:
+        try:
+            raw, metadata = model_router.invoke_text(
+                "architecture_design",
+                ARCHITECTURE_SYSTEM,
+                "Project file/import summary:\n" + "\n".join(summary_lines),
+            )
+            architecture = (
+                sanitize_mermaid(raw)
+                if metadata.get("provider") != "none"
+                else FALLBACK_ARCHITECTURE
+            )
+        except Exception:
+            metadata = {"provider": "none", "model": "none"}
 
     architecture_path(user_id, project_name).write_text(architecture, encoding="utf-8")
 
