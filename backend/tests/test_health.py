@@ -20,6 +20,7 @@ os.environ.update({
 
 from fastapi.testclient import TestClient
 
+from agents.commenter import commenter_node
 from config import settings
 from main import app
 from utils.database import build_engine_options, engine
@@ -81,6 +82,25 @@ class HealthEndpointTests(unittest.TestCase):
 
         self.assertIsNone(options["connect_args"]["prepare_threshold"])
         self.assertTrue(options["pool_pre_ping"])
+
+    def test_default_ingestion_preserves_source_code_without_llm_calls(self):
+        source_path = TEST_PATH / "preserve_me.py"
+        original = "def answer():\n    return 42\n"
+        source_path.write_text(original, encoding="utf-8")
+        previous_setting = settings.ENABLE_LLM_CODE_COMMENTING
+        settings.ENABLE_LLM_CODE_COMMENTING = False
+        try:
+            result = commenter_node({
+                "unprocessed_files": [str(source_path)],
+                "processed_files": [],
+                "comment_report": [],
+            })
+        finally:
+            settings.ENABLE_LLM_CODE_COMMENTING = previous_setting
+
+        self.assertEqual(source_path.read_text(encoding="utf-8"), original)
+        self.assertEqual(result["processed_files"], [str(source_path)])
+        self.assertEqual(result["comment_report"][0]["status"], "preserved_original")
 
 
 if __name__ == "__main__":

@@ -18,6 +18,13 @@ Rules:
 """
 
 
+FALLBACK_ARCHITECTURE = """graph TD
+    User["User"] --> App["Application"]
+    App --> Code["Source files"]
+    Code --> Analysis["Static dependency analysis"]
+    Analysis --> Search["Searchable project index"]"""
+
+
 def extract_imports_from_file(file_path: str) -> list[str]:
     imports: list[str] = []
     ext = os.path.splitext(file_path)[1].lower()
@@ -108,10 +115,14 @@ def architect_node(state: dict):
             ARCHITECTURE_SYSTEM,
             "Project file/import summary:\n" + "\n".join(summary_lines),
         )
-        architecture = sanitize_mermaid(raw)
+        architecture = (
+            sanitize_mermaid(raw)
+            if metadata.get("provider") != "none"
+            else FALLBACK_ARCHITECTURE
+        )
     except Exception:
         metadata = {"provider": "none", "model": "none"}
-        architecture = "graph TD\n    User[\"User\"] --> App[\"Application\"]\n    App --> Code[\"Codebase\"]"
+        architecture = FALLBACK_ARCHITECTURE
 
     architecture_path(user_id, project_name).write_text(architecture, encoding="utf-8")
 

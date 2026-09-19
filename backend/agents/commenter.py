@@ -1,5 +1,6 @@
 import os
 
+from config import settings
 from providers import model_router
 from tools.ast_parser import EXTENSION_MAP, parse_code_file
 from utils.secrets import contains_secret, redact_secrets
@@ -74,6 +75,16 @@ def commenter_node(state: dict):
         return {"unprocessed_files": unprocessed, "processed_files": processed, "comment_report": comment_report}
 
     file_path = unprocessed.pop(0)
+
+    if not settings.ENABLE_LLM_CODE_COMMENTING:
+        processed.append(file_path)
+        comment_report.append({"file": file_path, "status": "preserved_original"})
+        return {
+            "unprocessed_files": unprocessed,
+            "processed_files": processed,
+            "comment_report": comment_report,
+        }
+
     ext = os.path.splitext(file_path)[1].lower()
     lang_profile = EXTENSION_MAP.get(ext, {
         "lang": "python",

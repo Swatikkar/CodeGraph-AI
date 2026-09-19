@@ -208,7 +208,7 @@ async def health():
         "status": "ok",
         "app": settings.APP_NAME,
         "environment": settings.ENVIRONMENT,
-        "storage_mode": settings.STORAGE_MODE,
+        "storage_mode": "supabase" if settings.use_supabase_storage else "local",
         "supabase_storage_enabled": settings.use_supabase_storage,
         "database_configured": bool(settings.DATABASE_URL),
     }

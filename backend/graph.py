@@ -5,6 +5,7 @@ from langgraph.graph import END, StateGraph
 
 from agents.architect import architect_node
 from agents.commenter import commenter_node
+from config import settings
 from tools.ingester import ingest_to_chroma
 from tools.scanner import get_codebase_map
 from utils.storage import ingestion_report_path, project_namespace, write_status
@@ -76,12 +77,17 @@ def wrapped_commenter_node(state: GraphState):
     processed = len(state.get("processed_files", []))
     total = max(unprocessed + processed, 1)
     progress = 20 + int((processed / total) * 35)
+    stage_message = (
+        f"Commenting files ({processed}/{total})..."
+        if settings.ENABLE_LLM_CODE_COMMENTING
+        else f"Preparing source files ({processed}/{total})..."
+    )
     write_status(
         state["user_id"],
         state["project_name"],
         "processing",
         "comment",
-        f"Commenting files ({processed}/{total})...",
+        stage_message,
         progress,
     )
     result = commenter_node(state)
