@@ -57,6 +57,38 @@ services:
         value: "350000"
       - key: MAX_IMAGE_BYTES
         value: "5000000"
+      - key: INGESTION_WORKER_POLL_SECONDS
+        value: "2"
+      - key: INGESTION_JOB_MAX_ATTEMPTS
+        value: "3"
+      - key: INGESTION_JOB_STALE_SECONDS
+        value: "600"
+      - key: INGESTION_HEARTBEAT_SECONDS
+        value: "15"
+      - key: MAX_PROJECTS_PER_USER
+        value: "10"
+      - key: MAX_USER_SOURCE_BYTES
+        value: "100000000"
+      - key: MAX_CHAT_QUERY_CHARS
+        value: "8000"
+      - key: AUTH_RATE_LIMIT_ATTEMPTS
+        value: "10"
+      - key: AUTH_RATE_LIMIT_WINDOW_SECONDS
+        value: "300"
+      - key: CHAT_RATE_LIMIT_REQUESTS
+        value: "30"
+      - key: CHAT_RATE_LIMIT_WINDOW_SECONDS
+        value: "60"
+      - key: INGESTION_RATE_LIMIT_REQUESTS
+        value: "5"
+      - key: INGESTION_RATE_LIMIT_WINDOW_SECONDS
+        value: "600"
+      - key: RETRIEVAL_VECTOR_CANDIDATES
+        value: "20"
+      - key: RETRIEVAL_LEXICAL_CANDIDATES
+        value: "20"
+      - key: RETRIEVAL_MAX_INDEX_DOCUMENTS
+        value: "2000"
       - key: SUPERVISOR_REASONING_MODELS
         value: groq:openai/gpt-oss-120b,groq:openai/gpt-oss-20b,openrouter:nvidia/nemotron-3-ultra-550b-a55b:free
       - key: DEBUGGER_CODING_MODELS

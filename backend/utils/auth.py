@@ -2,7 +2,7 @@
 from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 import jwt
 import bcrypt  # <-- NEW: Using native bcrypt instead of passlib
 from sqlalchemy.orm import Session
@@ -17,12 +17,23 @@ from models.user import UserModel
 auth_router = APIRouter(prefix="/api/auth", tags=["Authentication"])
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/auth/login")
 
+
+def validate_password_strength(value: str) -> str:
+    if not any(char.islower() for char in value) or not any(char.isupper() for char in value) or not any(char.isdigit() for char in value):
+        raise ValueError("Password must include uppercase, lowercase, and numeric characters.")
+    return value
+
 # ==========================================
 # SCHEMAS
 # ==========================================
 class UserSignUp(BaseModel):
     email: EmailStr
     password: str = Field(min_length=8, max_length=128)
+
+    @field_validator("password")
+    @classmethod
+    def strong_password(cls, value: str) -> str:
+        return validate_password_strength(value)
 
 class Token(BaseModel):
     access_token: str
@@ -32,6 +43,11 @@ class Token(BaseModel):
 class PasswordChange(BaseModel):
     current_password: str = Field(min_length=8, max_length=128)
     new_password: str = Field(min_length=8, max_length=128)
+
+    @field_validator("new_password")
+    @classmethod
+    def strong_new_password(cls, value: str) -> str:
+        return validate_password_strength(value)
 
 # ==========================================
 # DEPENDENCY

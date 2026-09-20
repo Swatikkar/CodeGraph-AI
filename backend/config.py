@@ -139,6 +139,23 @@ class Settings(BaseSettings):
     MAX_IMAGE_BYTES: int = 5_000_000
     ALLOWED_IMAGE_TYPES: set[str] = {"image/png", "image/jpeg", "image/webp"}
 
+    INGESTION_WORKER_POLL_SECONDS: float = 2.0
+    INGESTION_JOB_MAX_ATTEMPTS: int = 3
+    INGESTION_JOB_STALE_SECONDS: int = 600
+    INGESTION_HEARTBEAT_SECONDS: int = 15
+    MAX_PROJECTS_PER_USER: int = 10
+    MAX_USER_SOURCE_BYTES: int = 100_000_000
+    MAX_CHAT_QUERY_CHARS: int = 8_000
+    AUTH_RATE_LIMIT_ATTEMPTS: int = 10
+    AUTH_RATE_LIMIT_WINDOW_SECONDS: int = 300
+    CHAT_RATE_LIMIT_REQUESTS: int = 30
+    CHAT_RATE_LIMIT_WINDOW_SECONDS: int = 60
+    INGESTION_RATE_LIMIT_REQUESTS: int = 5
+    INGESTION_RATE_LIMIT_WINDOW_SECONDS: int = 600
+    RETRIEVAL_VECTOR_CANDIDATES: int = 20
+    RETRIEVAL_LEXICAL_CANDIDATES: int = 20
+    RETRIEVAL_MAX_INDEX_DOCUMENTS: int = 2_000
+
     model_config = SettingsConfigDict(env_file=BASE_DIR / ".env", env_file_encoding="utf-8", extra="ignore")
 
     @property

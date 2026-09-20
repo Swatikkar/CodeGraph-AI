@@ -13,16 +13,15 @@ APP_IMPORT_STARTED_AT = time.perf_counter()
 
 from pathlib import Path
 
-from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import HumanMessage
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from config import settings
-from graph import codegraph_app
 from graph_chat import chat_graph_app, close_chat_storage
 from providers import model_router
 from tools.file_ops import write_project_file_after_approval
@@ -41,14 +40,17 @@ from utils.observability import log_event, request_observability_middleware
 from utils.project_persistence import (
     delete_project_from_db,
     ensure_retrieval_cache,
+    enforce_user_project_quota,
     list_user_projects_from_db,
     materialize_project_from_db,
     persist_chat_message,
     persist_project_snapshot,
+    persist_project_source,
     read_chat_messages,
     require_project,
     reserve_project_ingestion,
     storage_enabled,
+    update_project_status,
 )
 from utils.storage import (
     architecture_path,
@@ -65,6 +67,15 @@ from utils.storage import (
     write_status,
 )
 from utils.readiness import critical_config_errors
+from utils.ingestion_jobs import (
+    enqueue_ingestion_job,
+    job_payload,
+    require_user_job,
+    retry_failed_job,
+    worker_loop,
+)
+from utils.migrations import run_database_migrations
+from utils.rate_limit import rate_limit_middleware
 
 
 settings.configure_langsmith()
@@ -73,6 +84,12 @@ settings.create_required_directories()
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    run_database_migrations()
+    worker_stop = threading.Event()
+    worker_thread = None
+    if settings.ENVIRONMENT != "test":
+        worker_thread = threading.Thread(target=worker_loop, args=(worker_stop,), daemon=True, name="ingestion-worker")
+        worker_thread.start()
     log_event(
         "application_started",
         environment=settings.ENVIRONMENT,
@@ -81,12 +98,16 @@ async def lifespan(_app: FastAPI):
     try:
         yield
     finally:
+        worker_stop.set()
+        if worker_thread:
+            worker_thread.join(timeout=5)
         close_chat_storage()
         log_event("application_stopped")
 
 
 app = FastAPI(title=settings.APP_NAME, version="2.0.0", lifespan=lifespan)
 app.middleware("http")(request_observability_middleware)
+app.middleware("http")(rate_limit_middleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
@@ -102,17 +123,17 @@ _active_ingestions_lock = threading.Lock()
 
 
 class GitRepoPayload(BaseModel):
-    repo_url: str
-    project_name: str
+    repo_url: str = Field(min_length=10, max_length=500)
+    project_name: str = Field(min_length=1, max_length=120)
 
 
 class ChatPayload(BaseModel):
-    project_name: str
-    query: str
-    thread_id: str
+    project_name: str = Field(min_length=1, max_length=120)
+    query: str = Field(min_length=1, max_length=settings.MAX_CHAT_QUERY_CHARS)
+    thread_id: str = Field(min_length=1, max_length=200)
     is_approval: bool = False
-    approval_file_path: str | None = None
-    approval_new_content: str | None = None
+    approval_file_path: str | None = Field(default=None, max_length=500)
+    approval_new_content: str | None = Field(default=None, max_length=settings.MAX_FILE_BYTES)
 
 
 def reserve_local_ingestion_slot(user_id: int | str, project_name: str) -> bool:
@@ -192,43 +213,6 @@ def normalize_ai_content(raw_content) -> str:
     return text
 
 
-def run_pipeline_in_background(user_id: str, project_name: str):
-    pipeline_succeeded = False
-    try:
-        state = {
-            "user_id": str(user_id),
-            "project_name": project_name,
-            "project_path": str(project_root(user_id, project_name)),
-            "unprocessed_files": [],
-            "processed_files": [],
-            "comment_report": [],
-            "scanned_files": 0,
-            "errors": [],
-        }
-        recursion_limit = max(50, settings.MAX_PROJECT_FILES + 10)
-        result = codegraph_app.invoke(state, config={"recursion_limit": recursion_limit})
-        pipeline_succeeded = not result.get("errors") and read_status(user_id, project_name).get("status") != "error"
-    except Exception as exc:
-        log_event(
-            "ingestion_pipeline_failed",
-            user_id=str(user_id),
-            project_name=project_name,
-            error_type=type(exc).__name__,
-            error_message=str(exc)[:500],
-        )
-        write_status(user_id, project_name, "error", "pipeline", "Background analysis failed.", 0, str(exc))
-    finally:
-        try:
-            persist_project_snapshot(user_id, project_name)
-        except Exception as exc:
-            pipeline_succeeded = False
-            write_status(user_id, project_name, "error", "persist", "Project persistence failed.", 0, type(exc).__name__)
-            print(f"[persistence] warning: failed to persist project snapshot: {exc}", flush=True)
-        if pipeline_succeeded:
-            write_status(user_id, project_name, "ready", "complete", "Project is ready for chat.", 100)
-        release_local_ingestion_slot(user_id, project_name)
-
-
 @app.get("/api/health")
 async def health():
     return {
@@ -264,7 +248,6 @@ async def readiness(db: Session = Depends(get_db)):
 
 @app.post("/api/process-zip")
 async def process_zip_upload(
-    background_tasks: BackgroundTasks,
     project_name: str = Form(...),
     file: UploadFile = File(...),
     current_user=Depends(get_current_user),
@@ -272,29 +255,19 @@ async def process_zip_upload(
 ):
     await validate_zip_upload(file)
     slug = slugify_project_name(project_name)
+    enforce_user_project_quota(db, current_user.id, slug)
     if not reserve_local_ingestion_slot(current_user.id, slug):
         raise HTTPException(status_code=409, detail="This project is already being ingested.")
-    if storage_enabled():
-        try:
-            project = reserve_project_ingestion(
-                db,
-                current_user.id,
-                slug,
-                project_name.strip(),
-                "zip",
-                stage="upload",
-                message=f"Project '{slug}' upload started.",
-            )
-            print(
-                f"[persistence] project row ready id={project.id} user={current_user.id} slug={slug} source=zip",
-                flush=True,
-            )
-        except Exception as exc:
-            release_local_ingestion_slot(current_user.id, slug)
-            print(f"[persistence] failed to create project row user={current_user.id} slug={slug}: {exc}", flush=True)
-            if isinstance(exc, HTTPException):
-                raise
-            raise HTTPException(status_code=500, detail="Failed to create durable project record.") from exc
+    try:
+        project = reserve_project_ingestion(
+            db, current_user.id, slug, project_name.strip(), "zip",
+            stage="upload", message=f"Project '{slug}' upload started.",
+        )
+    except Exception as exc:
+        release_local_ingestion_slot(current_user.id, slug)
+        if isinstance(exc, HTTPException):
+            raise
+        raise HTTPException(status_code=500, detail="Failed to create durable project record.") from exc
 
     try:
         ensure_project_dirs(current_user.id, slug)
@@ -330,46 +303,44 @@ async def process_zip_upload(
         release_local_ingestion_slot(current_user.id, slug)
         raise HTTPException(status_code=500, detail="Failed to handle ZIP upload.") from exc
 
-    background_tasks.add_task(run_pipeline_in_background, str(current_user.id), slug)
-    return {"status": "processing", "project_name": slug, "message": f"Project '{slug}' uploaded successfully."}
+    try:
+        persist_project_source(current_user.id, slug)
+        job = enqueue_ingestion_job(db, project)
+    except Exception as exc:
+        update_project_status(
+            db, current_user.id, slug, "error", "queue",
+            "Project could not be queued for analysis.", 5, type(exc).__name__,
+        )
+        release_local_ingestion_slot(current_user.id, slug)
+        raise
+    release_local_ingestion_slot(current_user.id, slug)
+    return {"status": "queued", "job_id": job.id, "project_name": slug, "message": f"Project '{slug}' was queued successfully."}
 
 
 @app.post("/api/process-git")
 async def process_git_repo(
     payload: GitRepoPayload,
-    background_tasks: BackgroundTasks,
     current_user=Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     slug = slugify_project_name(payload.project_name)
+    enforce_user_project_quota(db, current_user.id, slug)
     try:
         repository_url = validate_git_repo_url(payload.repo_url)
     except IngestionValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not reserve_local_ingestion_slot(current_user.id, slug):
         raise HTTPException(status_code=409, detail="This project is already being ingested.")
-    if storage_enabled():
-        try:
-            project = reserve_project_ingestion(
-                db,
-                current_user.id,
-                slug,
-                payload.project_name.strip(),
-                "git",
-                repository_url,
-                stage="clone",
-                message=f"Repository clone started as '{slug}'.",
-            )
-            print(
-                f"[persistence] project row ready id={project.id} user={current_user.id} slug={slug} source=git",
-                flush=True,
-            )
-        except Exception as exc:
-            release_local_ingestion_slot(current_user.id, slug)
-            print(f"[persistence] failed to create project row user={current_user.id} slug={slug}: {exc}", flush=True)
-            if isinstance(exc, HTTPException):
-                raise
-            raise HTTPException(status_code=500, detail="Failed to create durable project record.") from exc
+    try:
+        project = reserve_project_ingestion(
+            db, current_user.id, slug, payload.project_name.strip(), "git", repository_url,
+            stage="clone", message=f"Repository clone started as '{slug}'.",
+        )
+    except Exception as exc:
+        release_local_ingestion_slot(current_user.id, slug)
+        if isinstance(exc, HTTPException):
+            raise
+        raise HTTPException(status_code=500, detail="Failed to create durable project record.") from exc
 
     try:
         ensure_project_dirs(current_user.id, slug)
@@ -428,8 +399,28 @@ async def process_git_repo(
         release_local_ingestion_slot(current_user.id, slug)
         raise HTTPException(status_code=500, detail="Failed to clone repository.") from exc
 
-    background_tasks.add_task(run_pipeline_in_background, str(current_user.id), slug)
-    return {"status": "processing", "project_name": slug, "message": "Repository cloned successfully."}
+    try:
+        persist_project_source(current_user.id, slug)
+        job = enqueue_ingestion_job(db, project)
+    except Exception as exc:
+        update_project_status(
+            db, current_user.id, slug, "error", "queue",
+            "Repository could not be queued for analysis.", 5, type(exc).__name__,
+        )
+        release_local_ingestion_slot(current_user.id, slug)
+        raise
+    release_local_ingestion_slot(current_user.id, slug)
+    return {"status": "queued", "job_id": job.id, "project_name": slug, "message": "Repository was queued successfully."}
+
+
+@app.get("/api/jobs/{job_id}")
+async def get_ingestion_job(job_id: int, current_user=Depends(get_current_user), db: Session = Depends(get_db)):
+    return job_payload(require_user_job(db, job_id, current_user.id))
+
+
+@app.post("/api/jobs/{job_id}/retry")
+async def retry_ingestion_job(job_id: int, current_user=Depends(get_current_user), db: Session = Depends(get_db)):
+    return job_payload(retry_failed_job(db, job_id, current_user.id))
 
 
 @app.get("/api/projects")
@@ -562,6 +553,9 @@ async def get_chat_history(project_name: str, current_user=Depends(get_current_u
 async def handle_chat_interaction(payload: ChatPayload, current_user=Depends(get_current_user), db: Session = Depends(get_db)):
     slug = slugify_project_name(payload.project_name)
     if storage_enabled():
+        project = require_project(db, current_user.id, slug)
+        if project.status != "ready":
+            raise HTTPException(status_code=409, detail="Project ingestion is not complete.")
         materialize_project_from_db(db, current_user.id, slug)
         ensure_retrieval_cache(db, current_user.id, slug)
     public_project_name = public_project_name_for_chat(db, current_user.id, slug)
@@ -677,7 +671,8 @@ async def handle_chat_interaction(payload: ChatPayload, current_user=Depends(get
                 yield sse_event("approval_required", content="The debugger wants to use a protected tool. Review before approving.")
             yield sse_event("done")
         except Exception as exc:
-            yield sse_event("error", content=f"LangGraph streaming error: {exc}")
+            log_event("chat_stream_failed", user_id=str(current_user.id), project_name=slug, error_type=type(exc).__name__)
+            yield sse_event("error", content="The chat request could not be completed. Please try again.")
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
@@ -696,6 +691,8 @@ async def analyze_error_screenshot(
     current_user=Depends(get_current_user),
 ):
     await validate_image_upload(file)
+    if len(prompt) > settings.MAX_CHAT_QUERY_CHARS:
+        raise HTTPException(status_code=413, detail="Prompt is too large.")
     slug = slugify_project_name(project_name)
     print(f"[vision] Vision analysis requested for screenshot in project '{slug}'", flush=True)
     data = await file.read()

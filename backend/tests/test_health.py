@@ -1,7 +1,8 @@
-import os
 import json
+import os
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -30,10 +31,13 @@ from agents.supervisor import supervisor_node
 from providers.local_embeddings import LocalHashingEmbeddings
 from providers.router import ModelRouter
 from config import settings
-from main import app, release_local_ingestion_slot, reserve_local_ingestion_slot, run_pipeline_in_background
-from models.user import ProjectModel
+from main import app, release_local_ingestion_slot, reserve_local_ingestion_slot
+from models.user import IngestionJobModel, ProjectModel
 from utils.database import SessionLocal, build_engine_options, engine
-from utils.project_persistence import reserve_project_ingestion
+from utils.project_persistence import enforce_user_project_quota, reserve_project_ingestion
+from utils.ingestion_jobs import _recover_stale_jobs, claim_next_job, enqueue_ingestion_job, execute_job
+from utils.rate_limit import SlidingWindowLimiter
+from utils.auth import UserSignUp
 from utils.readiness import critical_config_errors
 
 
@@ -207,39 +211,104 @@ class HealthEndpointTests(unittest.TestCase):
             db.commit()
             db.close()
 
-    def test_pipeline_publishes_ready_only_after_snapshot_persistence(self):
-        events = []
-        user_id = "pipeline-order-user"
-        project_name = "pipeline-order-project"
-        self.assertTrue(reserve_local_ingestion_slot(user_id, project_name))
-        with (
-            patch("main.codegraph_app.invoke", return_value={"errors": []}),
-            patch("main.read_status", return_value={"status": "processing"}),
-            patch("main.persist_project_snapshot", side_effect=lambda *_args: events.append("persist")),
-            patch("main.write_status", side_effect=lambda _user, _project, status, *_args: events.append(status)),
-        ):
-            run_pipeline_in_background(user_id, project_name)
+    def test_durable_job_claim_and_completion(self):
+        db = SessionLocal()
+        project = reserve_project_ingestion(db, "job-user", "job-project", "Job Project", "git")
+        job = enqueue_ingestion_job(db, project)
+        job_id = job.id
+        project_id = project.id
+        db.close()
 
-        self.assertEqual(events, ["persist", "ready"])
-        self.assertTrue(reserve_local_ingestion_slot(user_id, project_name))
-        release_local_ingestion_slot(user_id, project_name)
+        self.assertEqual(claim_next_job(), job_id)
+        with patch("utils.ingestion_jobs._run_pipeline"), patch("utils.ingestion_jobs.write_status"):
+            execute_job(job_id)
 
-    def test_snapshot_failure_is_terminal_and_never_reports_ready(self):
-        statuses = []
-        user_id = "pipeline-failure-user"
-        project_name = "pipeline-failure-project"
-        self.assertTrue(reserve_local_ingestion_slot(user_id, project_name))
-        with (
-            patch("main.codegraph_app.invoke", return_value={"errors": []}),
-            patch("main.read_status", return_value={"status": "processing"}),
-            patch("main.persist_project_snapshot", side_effect=RuntimeError("database unavailable")),
-            patch("main.write_status", side_effect=lambda _user, _project, status, *_args: statuses.append(status)),
-        ):
-            run_pipeline_in_background(user_id, project_name)
+        db = SessionLocal()
+        try:
+            completed = db.get(IngestionJobModel, job_id)
+            self.assertEqual(completed.status, "completed")
+            self.assertEqual(completed.project.status, "ready")
+            self.assertIsNotNone(completed.finished_at)
+        finally:
+            db.delete(db.get(ProjectModel, project_id))
+            db.commit()
+            db.close()
 
-        self.assertEqual(statuses, ["error"])
-        self.assertTrue(reserve_local_ingestion_slot(user_id, project_name))
-        release_local_ingestion_slot(user_id, project_name)
+    def test_stale_running_job_becomes_retryable(self):
+        db = SessionLocal()
+        project = reserve_project_ingestion(db, "stale-user", "stale-project", "Stale Project", "git")
+        job = enqueue_ingestion_job(db, project)
+        job.status = "running"
+        job.attempt_count = 1
+        job.heartbeat_at = datetime.now(timezone.utc) - timedelta(seconds=settings.INGESTION_JOB_STALE_SECONDS + 1)
+        project_id = project.id
+        db.commit()
+        try:
+            self.assertEqual(_recover_stale_jobs(db), 1)
+            db.refresh(job)
+            self.assertEqual(job.status, "retryable")
+            self.assertEqual(job.project.status, "retryable")
+            self.assertEqual(job.error_code, "stale_worker")
+        finally:
+            db.delete(db.get(ProjectModel, project_id))
+            db.commit()
+            db.close()
+
+    def test_project_quota_blocks_new_projects(self):
+        previous_limit = settings.MAX_PROJECTS_PER_USER
+        settings.MAX_PROJECTS_PER_USER = 1
+        db = SessionLocal()
+        project = reserve_project_ingestion(db, "quota-user", "existing-project", "Existing Project", "git")
+        project_id = project.id
+        try:
+            with self.assertRaises(HTTPException) as blocked:
+                enforce_user_project_quota(db, "quota-user", "another-project")
+            self.assertEqual(blocked.exception.status_code, 413)
+        finally:
+            settings.MAX_PROJECTS_PER_USER = previous_limit
+            db.delete(db.get(ProjectModel, project_id))
+            db.commit()
+            db.close()
+
+    def test_durable_job_failure_is_terminal_after_max_attempts(self):
+        db = SessionLocal()
+        project = reserve_project_ingestion(db, "failed-job-user", "failed-job", "Failed Job", "git")
+        job = enqueue_ingestion_job(db, project)
+        job.max_attempts = 1
+        db.commit()
+        job_id = job.id
+        project_id = project.id
+        db.close()
+
+        self.assertEqual(claim_next_job(), job_id)
+        with patch("utils.ingestion_jobs._run_pipeline", side_effect=RuntimeError("provider unavailable")), patch("utils.ingestion_jobs.write_status"):
+            execute_job(job_id)
+
+        db = SessionLocal()
+        try:
+            failed = db.get(IngestionJobModel, job_id)
+            self.assertEqual(failed.status, "failed")
+            self.assertEqual(failed.project.status, "error")
+            self.assertEqual(failed.error_code, "RuntimeError")
+        finally:
+            db.delete(db.get(ProjectModel, project_id))
+            db.commit()
+            db.close()
+
+    def test_rate_limiter_returns_retry_after_and_recovers(self):
+        limiter = SlidingWindowLimiter()
+        self.assertEqual(limiter.allow("client", 2, 10, now=0), (True, 0))
+        self.assertEqual(limiter.allow("client", 2, 10, now=1), (True, 0))
+        allowed, retry_after = limiter.allow("client", 2, 10, now=2)
+        self.assertFalse(allowed)
+        self.assertGreaterEqual(retry_after, 1)
+        self.assertEqual(limiter.allow("client", 2, 10, now=11), (True, 0))
+
+    def test_password_policy_requires_mixed_case_and_number(self):
+        with self.assertRaises(ValueError):
+            UserSignUp(email="test@example.com", password="alllowercase")
+        valid = UserSignUp(email="test@example.com", password="StrongPass9")
+        self.assertEqual(valid.password, "StrongPass9")
 
 
 if __name__ == "__main__":

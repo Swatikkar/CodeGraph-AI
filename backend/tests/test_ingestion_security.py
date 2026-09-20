@@ -25,6 +25,9 @@ from config import settings
 from main import release_local_ingestion_slot, reserve_local_ingestion_slot
 from tools.ingester import purge_project_from_chroma
 from tools.ingester import ingest_to_chroma
+from tools.ingester import extract_code_symbols
+from tools.retriever import hybrid_retrieve
+from langchain_core.documents import Document
 from tools.scanner import get_codebase_map
 from utils.ingestion_security import (
     IngestionValidationError,
@@ -176,6 +179,28 @@ class ScannerBoundaryTests(unittest.TestCase):
         self.assertEqual(result["total_files"], 1)
         self.assertEqual(result["selected_bytes"], 4)
         self.assertEqual(result["skip_reasons"]["project_byte_limit"], 1)
+
+
+class HybridRetrievalTests(unittest.TestCase):
+    def test_symbol_metadata_extracts_classes_and_functions(self):
+        symbols = extract_code_symbols("class BillingService:\n    def calculate_total(self):\n        pass\n", ".py")
+        self.assertIn("BillingService", symbols)
+        self.assertIn("calculate_total", symbols)
+
+    def test_exact_symbol_is_promoted_by_hybrid_retrieval(self):
+        generic = Document(page_content="utility helper response", metadata={"relative_path": "utils.py", "symbols": "helper", "language": "py"})
+        exact = Document(page_content="class BillingService: pass", metadata={"relative_path": "billing.py", "symbols": "BillingService", "language": "py"})
+        vectorstore = MagicMock()
+        vectorstore.similarity_search.return_value = [generic, exact]
+        vectorstore._collection.get.return_value = {
+            "documents": [generic.page_content, exact.page_content],
+            "metadatas": [generic.metadata, exact.metadata],
+        }
+        with patch("tools.retriever.get_vectorstore", return_value=vectorstore):
+            result = hybrid_retrieve("Where is BillingService defined?", "user_project", top_n=1)
+
+        self.assertIn("billing.py", result)
+        self.assertIn("Confidence:", result)
 
 
 class DuplicateIngestionTests(unittest.TestCase):

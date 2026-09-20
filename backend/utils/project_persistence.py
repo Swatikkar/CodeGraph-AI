@@ -1,11 +1,13 @@
 import hashlib
 import json
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import HTTPException
 from langchain_core.documents import Document
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from config import IGNORE_DIRS, IGNORE_EXTS, settings
@@ -18,6 +20,7 @@ from models.user import (
 )
 from tools.ingester import get_splitter_for_file, ingest_to_chroma
 from utils.database import SessionLocal
+from utils.chroma import VECTOR_COLLECTION_NAME, ensure_chroma_defaults
 from utils.secrets import redact_secrets
 from utils.storage import (
     architecture_path,
@@ -102,6 +105,8 @@ def reserve_project_ingestion(
     project.message = message
     project.progress = 1
     project.error = None
+    project.vector_index_status = "pending"
+    project.vector_index_error = None
     try:
         db.commit()
     except IntegrityError as exc:
@@ -112,6 +117,28 @@ def reserve_project_ingestion(
         raise
     db.refresh(project)
     return project
+
+
+def enforce_user_project_quota(db: Session, user_id: int | str, slug: str) -> None:
+    normalized_user_id = normalize_user_id(user_id)
+    slug = slugify_project_name(slug)
+    existing = get_project(db, normalized_user_id, slug)
+    if not existing:
+        project_count = db.query(ProjectModel).filter(
+            ProjectModel.user_id == normalized_user_id,
+            ProjectModel.status.notin_(("deleted", "delete_pending")),
+        ).count()
+        if project_count >= settings.MAX_PROJECTS_PER_USER:
+            raise HTTPException(status_code=413, detail="Project quota reached. Delete an existing project before adding another.")
+
+    stored_bytes = (
+        db.query(func.coalesce(func.sum(ProjectFileModel.size_bytes), 0))
+        .filter(ProjectFileModel.user_id == normalized_user_id)
+        .scalar()
+        or 0
+    )
+    if stored_bytes >= settings.MAX_USER_SOURCE_BYTES:
+        raise HTTPException(status_code=413, detail="Source storage quota reached.")
 
 
 def update_project_status(
@@ -212,6 +239,32 @@ def replace_project_chunks(db: Session, project: ProjectModel, files: list[tuple
     return chunk_count
 
 
+def persist_project_source(user_id: int | str, slug: str) -> int:
+    """Persist bounded source files before queueing so a restarted worker can resume."""
+    if not storage_enabled():
+        return 0
+    db = SessionLocal()
+    try:
+        project = require_project(db, user_id, slug)
+        files = list(iter_persistable_files(project_root(user_id, slug)))
+        source_bytes = sum(len(content.encode("utf-8")) for _, content in files)
+        other_bytes = (
+            db.query(func.coalesce(func.sum(ProjectFileModel.size_bytes), 0))
+            .filter(ProjectFileModel.user_id == project.user_id, ProjectFileModel.project_id != project.id)
+            .scalar()
+            or 0
+        )
+        if other_bytes + source_bytes > settings.MAX_USER_SOURCE_BYTES:
+            raise HTTPException(status_code=413, detail="Source storage quota would be exceeded.")
+        db.query(ProjectFileModel).filter(ProjectFileModel.project_id == project.id).delete()
+        for rel_path, content in files:
+            upsert_project_file(db, project, rel_path, content)
+        db.commit()
+        return len(files)
+    finally:
+        db.close()
+
+
 def persist_project_snapshot(user_id: int | str, slug: str) -> None:
     if not storage_enabled():
         return
@@ -238,6 +291,9 @@ def persist_project_snapshot(user_id: int | str, slug: str) -> None:
 
         artifact_count = db.query(ProjectArtifactModel).filter(ProjectArtifactModel.project_id == project.id).count()
         chunk_count = replace_project_chunks(db, project, files)
+        project.vector_index_status = "ready"
+        project.vector_indexed_at = datetime.now(timezone.utc)
+        project.vector_index_error = None
         db.commit()
         print(
             f"[persistence] snapshot complete user={user_id} slug={slug} "
@@ -253,9 +309,12 @@ def materialize_project_from_db(db: Session, user_id: int | str, slug: str) -> P
     ensure_project_dirs(user_id, slug)
     root = project_root(user_id, slug)
     root.mkdir(parents=True, exist_ok=True)
+    resolved_root = root.resolve()
 
     for record in db.query(ProjectFileModel).filter(ProjectFileModel.project_id == project.id).all():
-        target = root / record.path
+        target = (root / record.path).resolve()
+        if target != resolved_root and resolved_root not in target.parents:
+            raise RuntimeError("Stored project file path escapes the project root.")
         target.parent.mkdir(parents=True, exist_ok=True)
         if not target.exists() or target.read_text(encoding="utf-8", errors="replace") != record.content:
             target.write_text(record.content, encoding="utf-8")
@@ -275,12 +334,39 @@ def ensure_retrieval_cache(db: Session, user_id: int | str, slug: str) -> None:
         return
     namespace = project_namespace(user_id, slug)
     chroma_root = project_chroma_root(user_id, slug)
+    project = require_project(db, user_id, slug)
     if chroma_root.exists():
-        return
-    materialize_project_from_db(db, user_id, slug)
-    files = [str(project_root(user_id, slug) / record.path) for record in db.query(ProjectFileModel).filter(ProjectFileModel.project_id == require_project(db, user_id, slug).id).all()]
-    if files:
+        try:
+            client = ensure_chroma_defaults(chroma_root)
+            names = {getattr(item, "name", str(item)) for item in client.list_collections()}
+            if VECTOR_COLLECTION_NAME in names and client.get_collection(VECTOR_COLLECTION_NAME).count() > 0:
+                if project.vector_index_status != "ready":
+                    project.vector_index_status = "ready"
+                    project.vector_index_error = None
+                    db.commit()
+                return
+        except Exception:
+            pass
+
+    project.vector_index_status = "rebuilding"
+    project.vector_index_error = None
+    db.commit()
+    try:
+        materialize_project_from_db(db, user_id, slug)
+        records = db.query(ProjectFileModel).filter(ProjectFileModel.project_id == project.id).all()
+        files = [str(project_root(user_id, slug) / record.path) for record in records]
+        if not files:
+            raise RuntimeError("No durable project files are available for vector rebuilding.")
         ingest_to_chroma(files, namespace, project_root=str(project_root(user_id, slug)), user_id=user_id)
+        project.vector_index_status = "ready"
+        project.vector_indexed_at = datetime.now(timezone.utc)
+        project.vector_index_error = None
+        db.commit()
+    except Exception as exc:
+        project.vector_index_status = "failed"
+        project.vector_index_error = type(exc).__name__
+        db.commit()
+        raise
 
 
 def project_status_payload(project: ProjectModel) -> dict:
@@ -290,6 +376,7 @@ def project_status_payload(project: ProjectModel) -> dict:
         "message": project.message or "",
         "progress": project.progress,
         "error": project.error,
+        "vector_index_status": project.vector_index_status,
         "created_at": project.created_at.isoformat() if project.created_at else None,
         "updated_at": project.updated_at.isoformat() if project.updated_at else None,
     }

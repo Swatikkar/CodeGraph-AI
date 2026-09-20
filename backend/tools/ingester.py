@@ -4,6 +4,8 @@ import shutil
 import stat
 import time
 import gc
+import ast
+import re
 from pathlib import Path
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter, Language
@@ -38,6 +40,26 @@ EXTENSION_TO_LANGUAGE = {
     ".cs":   Language.CSHARP,
     ".php":  Language.PHP,
 }
+
+
+def extract_code_symbols(content: str, extension: str) -> list[str]:
+    symbols: set[str] = set()
+    if extension == ".py":
+        try:
+            tree = ast.parse(content)
+            symbols.update(
+                node.name for node in ast.walk(tree)
+                if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+            )
+        except SyntaxError:
+            pass
+    symbols.update(
+        re.findall(
+            r"\b(?:class|interface|def|function|func|struct|enum)\s+([A-Za-z_$][\w$]*)",
+            content,
+        )
+    )
+    return sorted(symbols)[:100]
 
 
 def get_splitter_for_file(file_path: str) -> RecursiveCharacterTextSplitter:
@@ -96,6 +118,7 @@ def ingest_to_chroma(
         except Exception:
             rel_path = os.path.basename(file_path)
 
+        extension = os.path.splitext(file_path)[1].lower()
         doc = Document(
             page_content=redact_secrets(content),
             metadata={
@@ -104,7 +127,9 @@ def ingest_to_chroma(
                 "project": project_name,
                 "user_id": str(user_id) if user_id is not None else "",
                 "filename": os.path.basename(file_path),
-                "language": os.path.splitext(file_path)[1].lower().lstrip("."),
+                "language": extension.lstrip("."),
+                "module": Path(rel_path).stem,
+                "symbols": ",".join(extract_code_symbols(content, extension)),
                 "chunk_type": "commented_code",
             }
         )
