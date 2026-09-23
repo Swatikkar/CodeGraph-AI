@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import axios from "axios";
-import mermaid from "mermaid";
 import {
   Bot,
   ChevronRight,
@@ -151,11 +150,8 @@ const DiagramView = ({ projectName, mode }) => {
   const [isExpanded, setIsExpanded] = useState(false);
   const diagramRef = useRef(null);
   const expandedDiagramRef = useRef(null);
+  const mermaidRef = useRef(null);
   const title = mode === "architecture" ? "Architecture" : "Links";
-
-  useEffect(() => {
-    mermaid.initialize({ startOnLoad: false, theme: "dark" });
-  }, []);
 
   useEffect(() => {
     async function fetchDiagram() {
@@ -180,16 +176,40 @@ const DiagramView = ({ projectName, mode }) => {
 
   useEffect(() => {
     if (!code || !diagramRef.current) return;
-    diagramRef.current.removeAttribute("data-processed");
-    diagramRef.current.innerHTML = code;
-    mermaid.run({ nodes: [diagramRef.current] }).catch(() => {});
+    let cancelled = false;
+    async function renderDiagram() {
+      const module = await import("mermaid");
+      if (cancelled || !diagramRef.current) return;
+      const renderer = mermaidRef.current || module.default;
+      if (!mermaidRef.current) {
+        renderer.initialize({ startOnLoad: false, theme: "dark" });
+        mermaidRef.current = renderer;
+      }
+      diagramRef.current.removeAttribute("data-processed");
+      diagramRef.current.innerHTML = code;
+      await renderer.run({ nodes: [diagramRef.current] });
+    }
+    renderDiagram().catch(() => {});
+    return () => { cancelled = true; };
   }, [code]);
 
   useEffect(() => {
     if (!code || !isExpanded || !expandedDiagramRef.current) return;
-    expandedDiagramRef.current.removeAttribute("data-processed");
-    expandedDiagramRef.current.innerHTML = code;
-    mermaid.run({ nodes: [expandedDiagramRef.current] }).catch(() => {});
+    let cancelled = false;
+    async function renderExpandedDiagram() {
+      const module = await import("mermaid");
+      if (cancelled || !expandedDiagramRef.current) return;
+      const renderer = mermaidRef.current || module.default;
+      if (!mermaidRef.current) {
+        renderer.initialize({ startOnLoad: false, theme: "dark" });
+        mermaidRef.current = renderer;
+      }
+      expandedDiagramRef.current.removeAttribute("data-processed");
+      expandedDiagramRef.current.innerHTML = code;
+      await renderer.run({ nodes: [expandedDiagramRef.current] });
+    }
+    renderExpandedDiagram().catch(() => {});
+    return () => { cancelled = true; };
   }, [code, isExpanded]);
 
   useEffect(() => {
@@ -281,12 +301,14 @@ export default function Workspace() {
   const [loadingFile, setLoadingFile] = useState(false);
   const chatEndRef = useRef(null);
   const sseBuffer = useRef("");
+  const activeStreamController = useRef(null);
 
   useEffect(() => {
+    const controller = new AbortController();
     async function init() {
       const [treeResponse, historyResponse] = await Promise.allSettled([
-        axios.get(`${import.meta.env.VITE_API_URL}/project-structure/${projectName}`, getAuthHeaders()),
-        axios.get(`${import.meta.env.VITE_API_URL}/chat-history/${projectName}`, getAuthHeaders()),
+        axios.get(`${import.meta.env.VITE_API_URL}/project-structure/${projectName}`, { ...getAuthHeaders(), signal: controller.signal }),
+        axios.get(`${import.meta.env.VITE_API_URL}/chat-history/${projectName}`, { ...getAuthHeaders(), signal: controller.signal }),
       ]);
       if (treeResponse.status === "fulfilled") setTreeData(treeResponse.value.data.tree || []);
       if (historyResponse.status === "fulfilled" && historyResponse.value.data.messages?.length) {
@@ -296,6 +318,10 @@ export default function Workspace() {
       }
     }
     init();
+    return () => {
+      controller.abort();
+      activeStreamController.current?.abort();
+    };
   }, [projectName]);
 
   useEffect(() => {
@@ -388,6 +414,9 @@ export default function Workspace() {
     setReferences([]);
     setPatchStatus("");
     sseBuffer.current = "";
+    activeStreamController.current?.abort();
+    const streamController = new AbortController();
+    activeStreamController.current = streamController;
 
     const botIndex = chatMessages.length + 1;
     setChatMessages((prev) => [
@@ -417,6 +446,7 @@ export default function Workspace() {
           thread_id: projectName,
           is_approval: false,
         }),
+        signal: streamController.signal,
       });
       if (!response.ok) throw new Error(`HTTP error: ${response.status}`);
 
@@ -453,6 +483,7 @@ export default function Workspace() {
               console.warn("Could not fetch original file for diff preview", error);
             }
             setPatchPreview({
+              proposalId: data.proposal_id,
               filePath: data.file_path,
               newContent: data.new_content,
               originalContent,
@@ -471,8 +502,13 @@ export default function Workspace() {
         }
       }
     } catch (error) {
-      updateBotMessage(botIndex, `Connection error: ${error.message}`);
+      if (error.name !== "AbortError") {
+        updateBotMessage(botIndex, `Connection error: ${error.message}`);
+      }
     } finally {
+      if (activeStreamController.current === streamController) {
+        activeStreamController.current = null;
+      }
       setIsChatting(false);
     }
   };
@@ -493,8 +529,7 @@ export default function Workspace() {
           query: "Approve proposed patch.",
           thread_id: projectName,
           is_approval: true,
-          approval_file_path: patchPreview.filePath,
-          approval_new_content: patchPreview.newContent,
+          approval_proposal_id: patchPreview.proposalId,
         }),
       });
       if (!response.ok) throw new Error(`HTTP error: ${response.status}`);

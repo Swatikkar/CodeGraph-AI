@@ -1,5 +1,5 @@
 # utils/auth.py
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr, Field, field_validator
@@ -16,6 +16,7 @@ from models.user import UserModel
 # ==========================================
 auth_router = APIRouter(prefix="/api/auth", tags=["Authentication"])
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/auth/login")
+DUMMY_PASSWORD_HASH = "$2b$12$s6Fa5Ej.V25qiExVU69cBePDkTowiSR1UnVUXcaTmeqGJOCEoCA/e"
 
 
 def validate_password_strength(value: str) -> str:
@@ -77,13 +78,14 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
     try:
         payload = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
         email: str = payload.get("sub")
+        token_version = payload.get("ver")
         if email is None:
             raise credentials_exception
     except jwt.PyJWTError:
         raise credentials_exception
         
     user = db.query(UserModel).filter(UserModel.email == email).first()
-    if user is None:
+    if user is None or token_version != user.token_version:
         raise credentials_exception
     return user
 
@@ -113,13 +115,17 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = 
         raise HTTPException(status_code=400, detail="Login disabled. Use Supabase UI.")
 
     user = db.query(UserModel).filter(UserModel.email == form_data.username).first()
+    password_hash = user.hashed_password if user else DUMMY_PASSWORD_HASH
+    password_valid = bcrypt.checkpw(form_data.password.encode('utf-8'), password_hash.encode('utf-8'))
+    if not user or not password_valid:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     
-    # <-- NEW: Verify password with pure bcrypt
-    if not user or not bcrypt.checkpw(form_data.password.encode('utf-8'), user.hashed_password.encode('utf-8')):
-        raise HTTPException(status_code=400, detail="Incorrect email or password")
-    
-    expire = datetime.utcnow() + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-    to_encode = {"sub": user.email, "exp": expire}
+    expire = datetime.now(timezone.utc) + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode = {"sub": user.email, "ver": user.token_version, "exp": expire}
     access_token = jwt.encode(to_encode, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
     
     return {"access_token": access_token, "token_type": "bearer"}
@@ -144,5 +150,18 @@ async def change_password(
 
     salt = bcrypt.gensalt()
     user.hashed_password = bcrypt.hashpw(payload.new_password.encode("utf-8"), salt).decode("utf-8")
+    user.token_version += 1
     db.commit()
-    return {"message": "Password changed successfully."}
+    return {"message": "Password changed successfully. Sign in again on all devices."}
+
+
+@auth_router.post("/logout-all")
+async def logout_all(current_user=Depends(get_current_user), db: Session = Depends(get_db)):
+    if settings.AUTH_PROVIDER == "supabase":
+        raise HTTPException(status_code=400, detail="Session revocation must be handled by Supabase auth.")
+    user = db.query(UserModel).filter(UserModel.id == current_user.id).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="Could not validate credentials")
+    user.token_version += 1
+    db.commit()
+    return {"message": "All sessions were revoked."}

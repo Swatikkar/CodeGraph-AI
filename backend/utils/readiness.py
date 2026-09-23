@@ -24,6 +24,7 @@ def critical_config_errors() -> list[str]:
         settings.PROVIDER_MAX_RETRY_AFTER_SECONDS,
         settings.INGESTION_RETRY_BASE_SECONDS,
         settings.INGESTION_RETRY_MAX_SECONDS,
+        settings.PATCH_PROPOSAL_EXPIRE_MINUTES,
     )):
         errors.append("ai_runtime_limits_must_be_positive")
     if settings.PROVIDER_TRANSIENT_RETRIES < 0:

@@ -17,7 +17,7 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -25,7 +25,6 @@ from sqlalchemy.orm import Session
 from config import settings
 from graph_chat import chat_graph_app, close_chat_storage
 from providers import model_router
-from tools.file_ops import write_project_file_after_approval
 from tools.ingester import purge_project_from_chroma
 from tools.retriever import invalidate_vectorstore_cache
 from utils.auth import auth_router, get_current_user
@@ -75,12 +74,14 @@ from utils.ingestion_jobs import (
     job_payload,
     require_user_job,
     retry_failed_job,
+    summarize_job_operations,
     worker_loop,
 )
 from utils.migrations import run_database_migrations
 from utils.rate_limit import rate_limit_middleware
 from utils.ai_runtime import AIBudgetExceeded, ai_request_scope
 from utils.runtime_metrics import prune_runtime_metrics, record_runtime_metric, summarize_runtime_metrics
+from utils.patch_proposals import apply_patch_proposal, proposal_payload, require_user_proposal
 
 
 settings.configure_langsmith()
@@ -144,8 +145,7 @@ class ChatPayload(BaseModel):
     query: str = Field(min_length=1, max_length=settings.MAX_CHAT_QUERY_CHARS)
     thread_id: str = Field(min_length=1, max_length=200)
     is_approval: bool = False
-    approval_file_path: str | None = Field(default=None, max_length=500)
-    approval_new_content: str | None = Field(default=None, max_length=settings.MAX_FILE_BYTES)
+    approval_proposal_id: str | None = Field(default=None, min_length=32, max_length=64)
 
 
 def reserve_local_ingestion_slot(user_id: int | str, project_name: str) -> bool:
@@ -580,6 +580,15 @@ async def get_ai_metrics(
     return summarize_runtime_metrics(db, current_user.id, days)
 
 
+@app.get("/api/metrics/operations")
+async def get_operations_metrics(
+    days: int = 7,
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return summarize_job_operations(db, current_user.id, days)
+
+
 @app.post("/api/chat")
 async def handle_chat_interaction(
     payload: ChatPayload,
@@ -599,10 +608,13 @@ async def handle_chat_interaction(
     if not allowed:
         raise HTTPException(status_code=400, detail=guardrail_error)
 
-    authenticated_thread_id = f"user_{current_user.id}_{slug}_{payload.thread_id}"
+    trace_id = getattr(request.state, "request_id", uuid.uuid4().hex)
+    authenticated_thread_id = (
+        f"request_{trace_id}" if storage_enabled()
+        else f"user_{current_user.id}_{slug}_{payload.thread_id}"
+    )
     project_id = project_namespace(current_user.id, slug)
     config = {"configurable": {"thread_id": authenticated_thread_id}}
-    trace_id = getattr(request.state, "request_id", uuid.uuid4().hex)
     if storage_enabled() and not payload.is_approval:
         persist_chat_message(db, current_user.id, slug, "user", payload.query)
 
@@ -615,22 +627,43 @@ async def handle_chat_interaction(
             sequence += 1
             return sse_event(event_type, trace_id=trace_id, sequence=sequence, **fields)
 
+        yield emit("heartbeat")
         with ai_request_scope(trace_id, current_user.id, slug) as ai_run:
             try:
                 if payload.is_approval:
-                    if not payload.approval_file_path or payload.approval_new_content is None:
-                        yield emit("error", content="Approval requires file path and replacement content.")
+                    if not payload.approval_proposal_id:
+                        yield emit("error", content="Approval requires a valid proposal ID.")
                     else:
-                        result = write_project_file_after_approval(project_id, payload.approval_file_path, payload.approval_new_content)
+                        project_record = require_project(db, current_user.id, slug)
+                        proposal = require_user_proposal(
+                            db, payload.approval_proposal_id, current_user.id, project_record.id,
+                        )
+                        result = apply_patch_proposal(db, proposal)
                         persist_project_snapshot(current_user.id, slug)
-                        yield emit("tool_result", tool="write_project_file_after_approval", content=result)
+                        db.refresh(project_record)
+                        project_record.vector_index_status = "stale"
+                        project_record.vector_indexed_at = None
+                        project_record.vector_index_error = None
+                        db.commit()
+                        invalidate_vectorstore_cache(project_id)
+                        yield emit("tool_result", tool="apply_patch_proposal", content=result)
                         yield emit("done")
                     return
 
+                graph_messages = [HumanMessage(content=payload.query)]
+                if storage_enabled():
+                    durable_history = read_chat_messages(db, current_user.id, slug)[-10:]
+                    graph_messages = [
+                        HumanMessage(content=item["content"][-4000:])
+                        if item["role"] == "user"
+                        else AIMessage(content=item["content"][-4000:])
+                        for item in durable_history
+                        if item.get("content")
+                    ]
                 input_data = {
                     "project_name": project_id,
                     "public_project_name": public_project_name,
-                    "messages": [HumanMessage(content=payload.query)],
+                    "messages": graph_messages,
                     "provider_events": [],
                 }
                 accumulated = ""
@@ -645,13 +678,6 @@ async def handle_chat_interaction(
                             tool_name = tool_call.get("name", "tool")
                             tool_args = tool_call.get("args", {})
                             log_event("agent_tool_requested", trace_id=trace_id, owner=tool_owner, tool=tool_name)
-                            if tool_name == "propose_patch":
-                                yield emit(
-                                    "patch_preview",
-                                    file_path=tool_args.get("file_path", ""),
-                                    new_content=tool_args.get("new_content", ""),
-                                    summary="Review the proposed file replacement before approving the write.",
-                                )
                             yield emit("tool_start", tool=tool_name, args=tool_args)
                         continue
 
@@ -662,6 +688,21 @@ async def handle_chat_interaction(
                         for source in sorted(tool_references):
                             yield emit("reference", path=source)
                         if content.startswith("PATCH_PREVIEW_READY"):
+                            proposal_match = __import__("re").search(r"proposal_id=([0-9a-f]{32})", content)
+                            if proposal_match:
+                                proposal_db = SessionLocal()
+                                try:
+                                    project_record = require_project(proposal_db, current_user.id, slug)
+                                    proposal = require_user_proposal(
+                                        proposal_db, proposal_match.group(1), current_user.id, project_record.id,
+                                    )
+                                    yield emit(
+                                        "patch_preview",
+                                        **proposal_payload(proposal),
+                                        summary="Review the server-stored patch before approving it.",
+                                    )
+                                finally:
+                                    proposal_db.close()
                             yield emit("approval_required", content="A code patch is ready for review before writing.")
                         else:
                             yield emit("tool_result", content=content[:2000])
@@ -732,6 +773,15 @@ async def handle_chat_interaction(
                     context=ai_run,
                 )
                 yield emit("done")
+            except HTTPException as exc:
+                record_runtime_metric(
+                    kind="answer", component="chat_graph", status="failed",
+                    latency_ms=round((time.perf_counter() - request_started) * 1000),
+                    error_type="validation_error",
+                    attributes={"tool_calls": ai_run.tool_calls, "provider_calls": ai_run.provider_calls},
+                    context=ai_run,
+                )
+                yield emit("error", content=str(exc.detail))
             except Exception as exc:
                 record_runtime_metric(
                     kind="answer",
@@ -745,7 +795,15 @@ async def handle_chat_interaction(
                 log_event("chat_stream_failed", trace_id=trace_id, user_id=str(current_user.id), project_name=slug, error_type=type(exc).__name__)
                 yield emit("error", content="The chat request could not be completed. Please try again.")
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream", headers={"X-Trace-ID": trace_id})
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "X-Trace-ID": trace_id,
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 def re_search_tool_leak(content: str) -> bool:

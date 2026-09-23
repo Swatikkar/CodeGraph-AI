@@ -390,3 +390,40 @@ def job_events_payload(db: Session, job_id: int, user_id: int | str) -> list[dic
         "message": event.message,
         "created_at": event.created_at.isoformat() if event.created_at else None,
     } for event in events]
+
+
+def summarize_job_operations(db: Session, user_id: int | str, days: int = 7) -> dict:
+    bounded_days = max(1, min(days, 90))
+    cutoff = utc_now() - timedelta(days=bounded_days)
+    jobs = db.query(IngestionJobModel).filter(
+        IngestionJobModel.user_id == str(user_id),
+        IngestionJobModel.created_at >= cutoff,
+    ).all()
+    status_counts: dict[str, int] = {}
+    durations: list[float] = []
+    retry_count = 0
+    for job in jobs:
+        status_counts[job.status] = status_counts.get(job.status, 0) + 1
+        retry_count += max(0, job.attempt_count - 1)
+        if job.started_at and job.finished_at:
+            started_at = job.started_at
+            finished_at = job.finished_at
+            if started_at.tzinfo is None:
+                started_at = started_at.replace(tzinfo=timezone.utc)
+            if finished_at.tzinfo is None:
+                finished_at = finished_at.replace(tzinfo=timezone.utc)
+            durations.append(max(0.0, (finished_at - started_at).total_seconds()))
+    durations.sort()
+    p50 = durations[(len(durations) - 1) // 2] if durations else None
+    p95 = durations[min(len(durations) - 1, max(0, int(len(durations) * 0.95) - 1))] if durations else None
+    return {
+        "days": bounded_days,
+        "jobs": len(jobs),
+        "status_counts": status_counts,
+        "retry_count": retry_count,
+        "duration_seconds": {
+            "samples": len(durations),
+            "p50": round(p50, 2) if p50 is not None else None,
+            "p95": round(p95, 2) if p95 is not None else None,
+        },
+    }

@@ -36,7 +36,7 @@ from providers.local_embeddings import LocalHashingEmbeddings
 from providers.router import ModelRoute, ModelRouter, classify_provider_error, provider_circuits, transient_retry_delay
 from config import settings
 from main import app, release_local_ingestion_slot, reserve_local_ingestion_slot
-from models.user import IngestionJobEventModel, IngestionJobModel, ProjectModel, RuntimeMetricModel
+from models.user import IngestionJobEventModel, IngestionJobModel, ProjectModel, RuntimeMetricModel, UserModel
 from utils.database import SessionLocal, build_engine_options, engine
 from utils.project_persistence import enforce_user_project_quota, project_status_payload, reserve_project_ingestion
 from utils.ingestion_jobs import (
@@ -47,6 +47,7 @@ from utils.ingestion_jobs import (
     execute_job,
     job_events_payload,
     retry_failed_job,
+    summarize_job_operations,
 )
 from utils.job_control import IngestionCancelled, raise_if_cancelled
 from utils.rate_limit import SlidingWindowLimiter
@@ -58,6 +59,8 @@ from utils.ai_runtime import AIBudgetExceeded, ai_request_scope
 from utils.prompt_security import detect_prompt_injection, secure_repository_tool_messages, wrap_untrusted_context
 from utils.runtime_metrics import record_runtime_metric, summarize_runtime_metrics
 from tools.retriever import hybrid_retrieve
+from utils.patch_proposals import apply_patch_proposal, create_patch_proposal, require_user_proposal
+from utils.storage import project_root
 
 
 class HealthEndpointTests(unittest.TestCase):
@@ -78,6 +81,8 @@ class HealthEndpointTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "ok")
         self.assertRegex(response.headers["X-Request-ID"], r"^[0-9a-f]{32}$")
+        self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
+        self.assertEqual(response.headers["X-Frame-Options"], "DENY")
 
     def test_readiness_checks_database(self):
         response = self.client.get("/api/ready")
@@ -344,6 +349,59 @@ class HealthEndpointTests(unittest.TestCase):
         valid = UserSignUp(email="test@example.com", password="StrongPass9")
         self.assertEqual(valid.password, "StrongPass9")
 
+    def test_revoked_token_version_rejects_existing_session(self):
+        email = "session-version@example.com"
+        self.client.post("/api/auth/signup", json={"email": email, "password": "StrongPass9"})
+        login = self.client.post("/api/auth/login", data={"username": email, "password": "StrongPass9"})
+        self.assertEqual(login.status_code, 200)
+        headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+        self.assertEqual(self.client.get("/api/auth/me", headers=headers).status_code, 200)
+
+        db = SessionLocal()
+        try:
+            user = db.query(UserModel).filter(UserModel.email == email).one()
+            user.token_version += 1
+            db.commit()
+        finally:
+            db.close()
+        self.assertEqual(self.client.get("/api/auth/me", headers=headers).status_code, 401)
+
+        db = SessionLocal()
+        try:
+            db.query(UserModel).filter(UserModel.email == email).delete()
+            db.commit()
+        finally:
+            db.close()
+
+    def test_patch_approval_rejects_stale_file_and_applies_fresh_proposal(self):
+        db = SessionLocal()
+        project = reserve_project_ingestion(db, "patch-user", "patch-project", "Patch Project", "git")
+        project.status = "ready"
+        db.commit()
+        project_id = project.id
+        target = project_root("patch-user", "patch-project") / "main.py"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("value = 1\n", encoding="utf-8")
+        try:
+            stale = create_patch_proposal(db, "patch-user", "patch-project", "main.py", "value = 2\n")
+            target.write_text("value = 3\n", encoding="utf-8")
+            with self.assertRaises(HTTPException) as conflict:
+                apply_patch_proposal(db, stale)
+            self.assertEqual(conflict.exception.status_code, 409)
+            self.assertEqual(target.read_text(encoding="utf-8"), "value = 3\n")
+
+            fresh = create_patch_proposal(db, "patch-user", "patch-project", "main.py", "value = 4\n")
+            result = apply_patch_proposal(db, fresh)
+            self.assertIn(fresh.id, result)
+            self.assertEqual(target.read_text(encoding="utf-8"), "value = 4\n")
+            with self.assertRaises(HTTPException) as hidden:
+                require_user_proposal(db, fresh.id, "another-user", project_id)
+            self.assertEqual(hidden.exception.status_code, 404)
+        finally:
+            db.delete(db.get(ProjectModel, project_id))
+            db.commit()
+            db.close()
+
     def test_every_model_role_has_a_versioned_prompt(self):
         expected_roles = {
             "supervisor_reasoning", "debugger_coding", "commenter_code_docs",
@@ -480,6 +538,27 @@ class HealthEndpointTests(unittest.TestCase):
             job.next_attempt_at = datetime.now(timezone.utc) - timedelta(seconds=1)
             db.commit()
             self.assertEqual(claim_next_job(), job_id)
+        finally:
+            db.delete(db.get(ProjectModel, project_id))
+            db.commit()
+            db.close()
+
+    def test_operations_metrics_are_user_scoped(self):
+        db = SessionLocal()
+        project = reserve_project_ingestion(db, "ops-user", "ops-project", "Ops Project", "git")
+        job = enqueue_ingestion_job(db, project)
+        job.status = "completed"
+        job.attempt_count = 2
+        job.started_at = datetime.now(timezone.utc) - timedelta(seconds=12)
+        job.finished_at = datetime.now(timezone.utc)
+        project_id = project.id
+        db.commit()
+        try:
+            summary = summarize_job_operations(db, "ops-user", 7)
+            self.assertEqual(summary["jobs"], 1)
+            self.assertEqual(summary["retry_count"], 1)
+            self.assertEqual(summary["status_counts"], {"completed": 1})
+            self.assertEqual(summarize_job_operations(db, "other-user", 7)["jobs"], 0)
         finally:
             db.delete(db.get(ProjectModel, project_id))
             db.commit()

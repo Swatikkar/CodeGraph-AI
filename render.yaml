@@ -71,6 +71,8 @@ services:
         value: "100000000"
       - key: MAX_CHAT_QUERY_CHARS
         value: "8000"
+      - key: PATCH_PROPOSAL_EXPIRE_MINUTES
+        value: "30"
       - key: AUTH_RATE_LIMIT_ATTEMPTS
         value: "10"
       - key: AUTH_RATE_LIMIT_WINDOW_SECONDS

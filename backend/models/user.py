@@ -10,6 +10,7 @@ class UserModel(Base):
     id = Column(Integer, primary_key=True, index=True)
     email = Column(String, unique=True, index=True, nullable=False)
     hashed_password = Column(String, nullable=False)
+    token_version = Column(Integer, nullable=False, default=0)
 
 
 
@@ -40,6 +41,7 @@ class ProjectModel(Base):
     chunks = relationship("ProjectChunkModel", back_populates="project", cascade="all, delete-orphan")
     chat_messages = relationship("ChatMessageModel", back_populates="project", cascade="all, delete-orphan")
     ingestion_job = relationship("IngestionJobModel", back_populates="project", cascade="all, delete-orphan", uselist=False)
+    patch_proposals = relationship("PatchProposalModel", back_populates="project", cascade="all, delete-orphan")
 
 
 class ProjectFileModel(Base):
@@ -144,6 +146,27 @@ class IngestionJobEventModel(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     job = relationship("IngestionJobModel", back_populates="events")
+
+
+class PatchProposalModel(Base):
+    __tablename__ = "patch_proposals"
+    __table_args__ = (
+        Index("ix_patch_proposals_user_status", "user_id", "status"),
+        Index("ix_patch_proposals_project_created", "project_id", "created_at"),
+    )
+
+    id = Column(String, primary_key=True)
+    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(String, index=True, nullable=False)
+    file_path = Column(Text, nullable=False)
+    base_checksum = Column(String, nullable=False)
+    proposed_content = Column(Text, nullable=False)
+    status = Column(String, nullable=False, default="pending")
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    applied_at = Column(DateTime(timezone=True), nullable=True)
+
+    project = relationship("ProjectModel", back_populates="patch_proposals")
 
 
 class RuntimeMetricModel(Base):

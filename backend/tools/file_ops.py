@@ -2,10 +2,11 @@ from pathlib import Path
 
 from langchain_core.tools import tool
 
-from config import settings
 from utils.guardrails import assert_supported_code_file
 from utils.secrets import redact_secrets
 from utils.storage import resolve_project_file, tree_cache_path
+from utils.database import SessionLocal
+from utils.patch_proposals import create_patch_proposal
 
 
 def split_project_namespace(project_name: str) -> tuple[str, str]:
@@ -55,31 +56,18 @@ def propose_patch(project_name: str, file_path: str, new_content: str) -> str:
     """
     try:
         user_id, slug = split_project_namespace(project_name)
-        target = resolve_project_file(user_id, slug, file_path)
-        if not target.exists():
-            return f"Error: File '{file_path}' not found."
-        assert_supported_code_file(target)
+        db = SessionLocal()
+        try:
+            proposal = create_patch_proposal(db, user_id, slug, file_path, new_content)
+        finally:
+            db.close()
         return (
             "PATCH_PREVIEW_READY\n"
-            f"project={project_name}\nfile={file_path}\n"
+            f"proposal_id={proposal.id}\nfile={file_path}\n"
             "The proposed replacement content is ready for user approval."
         )
     except Exception as exc:
         return f"Failed to prepare patch: {exc}"
-
-
-def write_project_file_after_approval(project_name: str, file_path: str, new_content: str) -> str:
-    """
-    Backend-only write helper. Do not expose directly to LLM tool binding.
-    """
-    user_id, slug = split_project_namespace(project_name)
-    target = resolve_project_file(user_id, slug, file_path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    assert_supported_code_file(target) if target.exists() else None
-    if len(new_content.encode("utf-8")) > settings.MAX_FILE_BYTES:
-        raise ValueError("Proposed file content exceeds maximum file size.")
-    target.write_text(new_content, encoding="utf-8")
-    return f"Success: File '{file_path}' was updated after user approval."
 
 
 # Backwards-compatible names for existing imports.

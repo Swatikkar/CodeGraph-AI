@@ -339,11 +339,11 @@ def ensure_retrieval_cache(db: Session, user_id: int | str, slug: str) -> None:
         try:
             client = ensure_chroma_defaults(chroma_root)
             names = {getattr(item, "name", str(item)) for item in client.list_collections()}
-            if VECTOR_COLLECTION_NAME in names and client.get_collection(VECTOR_COLLECTION_NAME).count() > 0:
-                if project.vector_index_status != "ready":
-                    project.vector_index_status = "ready"
-                    project.vector_index_error = None
-                    db.commit()
+            if (
+                project.vector_index_status == "ready"
+                and VECTOR_COLLECTION_NAME in names
+                and client.get_collection(VECTOR_COLLECTION_NAME).count() > 0
+            ):
                 return
         except Exception:
             pass
