@@ -9,9 +9,11 @@ from config import settings
 from tools.ingester import ingest_to_chroma
 from tools.scanner import get_codebase_map
 from utils.storage import ingestion_report_path, project_namespace, write_status
+from utils.job_control import raise_if_cancelled
 
 
 class GraphState(TypedDict):
+    job_id: int
     user_id: str
     project_name: str
     project_path: str
@@ -43,6 +45,7 @@ def write_ingestion_report(state: GraphState, **extra):
 
 
 def scanner_node(state: GraphState):
+    raise_if_cancelled(state.get("job_id"))
     write_status(state["user_id"], state["project_name"], "processing", "scan", "Scanning codebase...", 15)
     try:
         scan_result = get_codebase_map(
@@ -76,6 +79,7 @@ def scanner_node(state: GraphState):
 
 
 def wrapped_commenter_node(state: GraphState):
+    raise_if_cancelled(state.get("job_id"))
     unprocessed = len(state.get("unprocessed_files", []))
     processed = len(state.get("processed_files", []))
     total = max(unprocessed + processed, 1)
@@ -99,11 +103,13 @@ def wrapped_commenter_node(state: GraphState):
 
 
 def wrapped_architect_node(state: GraphState):
+    raise_if_cancelled(state.get("job_id"))
     write_status(state["user_id"], state["project_name"], "processing", "diagram", "Generating diagrams...", 65)
     return architect_node(state)
 
 
 def ingestion_node(state: GraphState):
+    raise_if_cancelled(state.get("job_id"))
     write_status(state["user_id"], state["project_name"], "processing", "embed", "Embedding chunks into ChromaDB...", 82)
     isolated_name = project_namespace(state["user_id"], state["project_name"])
     processed = state.get("processed_files", [])
@@ -116,6 +122,7 @@ def ingestion_node(state: GraphState):
         )
     else:
         embedded_chunks = 0
+    raise_if_cancelled(state.get("job_id"))
     write_ingestion_report(state, stage="embed", embedded_chunks=embedded_chunks)
     write_status(
         state["user_id"],

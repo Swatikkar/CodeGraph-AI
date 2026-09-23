@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import time
+import random
+import threading
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Iterable
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
@@ -40,6 +44,45 @@ class ModelRoute:
     @property
     def label(self) -> str:
         return f"{self.provider}:{self.model}"
+
+
+@dataclass
+class CircuitState:
+    failures: int = 0
+    open_until: float = 0.0
+
+
+class ProviderCircuitBreaker:
+    def __init__(self):
+        self._states: dict[str, CircuitState] = {}
+        self._lock = threading.Lock()
+
+    def remaining_cooldown(self, route_label: str, now: float | None = None) -> float:
+        current = time.monotonic() if now is None else now
+        with self._lock:
+            state = self._states.get(route_label)
+            return max(0.0, state.open_until - current) if state else 0.0
+
+    def success(self, route_label: str) -> None:
+        with self._lock:
+            self._states.pop(route_label, None)
+
+    def failure(self, route_label: str, error_type: str, now: float | None = None) -> None:
+        if error_type in {"configuration", "budget_exceeded", "circuit_open"}:
+            return
+        current = time.monotonic() if now is None else now
+        with self._lock:
+            state = self._states.setdefault(route_label, CircuitState())
+            state.failures += 1
+            if state.failures >= settings.PROVIDER_CIRCUIT_FAILURES:
+                state.open_until = current + settings.PROVIDER_CIRCUIT_COOLDOWN_SECONDS
+
+    def clear(self) -> None:
+        with self._lock:
+            self._states.clear()
+
+
+provider_circuits = ProviderCircuitBreaker()
 
 
 def parse_routes(raw: str) -> list[ModelRoute]:
@@ -89,6 +132,31 @@ def classify_provider_error(exc: Exception) -> str:
     if status_code and status_code >= 500:
         return "provider_unavailable"
     return "provider_error"
+
+
+def retry_after_seconds(exc: Exception) -> float | None:
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None) or getattr(exc, "headers", None) or {}
+    value = headers.get("Retry-After") or headers.get("retry-after")
+    if value is None:
+        return None
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        try:
+            retry_at = parsedate_to_datetime(str(value))
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            return max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+
+def transient_retry_delay(exc: Exception, retry_number: int) -> float:
+    header_delay = retry_after_seconds(exc)
+    base_delay = settings.PROVIDER_BACKOFF_BASE_SECONDS * (2 ** retry_number)
+    delay = header_delay if header_delay is not None else base_delay + random.uniform(0, base_delay * 0.25)
+    return min(settings.PROVIDER_MAX_RETRY_AFTER_SECONDS, max(0.0, delay))
 
 
 def response_token_usage(response: AIMessage, input_text: str) -> tuple[int, int, str]:
@@ -182,75 +250,92 @@ class ModelRouter:
         input_text = stringify_messages(messages)
         estimated_input_tokens = estimate_tokens(input_text)
         for route in self.routes_for_role(role):
-            started_at = time.perf_counter()
             context = current_ai_run()
-            try:
-                remaining = context.remaining_seconds() if context else settings.PROVIDER_TIMEOUT_SECONDS
-                timeout = max(0.1, min(settings.PROVIDER_TIMEOUT_SECONDS, remaining))
-                llm = self.llm_for_route(route, tools=tools, timeout_seconds=timeout)
-                if context:
-                    context.consume_provider_call(estimated_input_tokens)
-                log_event(
-                    "provider_attempt_started",
-                    trace_id=context.trace_id if context else "unscoped",
-                    role=role,
-                    prompt_id=prompt_spec.prompt_id,
-                    prompt_version=prompt_spec.version,
-                    provider=route.provider,
-                    model=route.model,
-                    tools_enabled=bool(tools),
-                )
-                response = llm.invoke(messages)
-                elapsed = round(time.perf_counter() - started_at, 2)
-                input_tokens, output_tokens, token_source = response_token_usage(response, input_text)
+            cooldown = provider_circuits.remaining_cooldown(route.label)
+            if cooldown > 0:
                 record_runtime_metric(
                     kind="provider",
                     component=route.label,
-                    status="success",
-                    latency_ms=round(elapsed * 1000),
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                    token_source=token_source,
-                    prompt_id=prompt_spec.prompt_id,
-                    prompt_version=prompt_spec.version,
-                    attributes={"role": role, "fallback_index": len(errors)},
-                )
-                metadata = {
-                    "provider": route.provider,
-                    "model": route.model,
-                    "elapsed_seconds": elapsed,
-                    "input_tokens": input_tokens,
-                    "output_tokens": output_tokens,
-                    "token_source": token_source,
-                    "prompt_id": prompt_spec.prompt_id,
-                    "prompt_version": prompt_spec.version,
-                    "fallback_errors": errors,
-                }
-                return response, metadata
-            except Exception as exc:
-                elapsed = round(time.perf_counter() - started_at, 2)
-                error_type = classify_provider_error(exc)
-                record_runtime_metric(
-                    kind="provider",
-                    component=route.label,
-                    status="skipped" if error_type == "configuration" else "failed",
-                    latency_ms=round(elapsed * 1000),
-                    input_tokens=estimated_input_tokens if error_type != "configuration" else 0,
+                    status="skipped",
+                    input_tokens=0,
                     output_tokens=0,
-                    token_source="estimated",
                     prompt_id=prompt_spec.prompt_id,
                     prompt_version=prompt_spec.version,
-                    error_type=error_type,
-                    attributes={"role": role, "fallback_index": len(errors)},
+                    error_type="circuit_open",
+                    attributes={"role": role, "cooldown_seconds": round(cooldown, 2)},
                 )
-                errors.append({
-                    "provider": route.provider,
-                    "model": route.model,
-                    "elapsed_seconds": elapsed,
-                    "error_type": error_type,
-                })
-                if error_type == "budget_exceeded":
+                errors.append({"provider": route.provider, "model": route.model, "error_type": "circuit_open"})
+                continue
+
+            for retry_number in range(settings.PROVIDER_TRANSIENT_RETRIES + 1):
+                started_at = time.perf_counter()
+                try:
+                    remaining = context.remaining_seconds() if context else settings.PROVIDER_TIMEOUT_SECONDS
+                    timeout = max(0.1, min(settings.PROVIDER_TIMEOUT_SECONDS, remaining))
+                    llm = self.llm_for_route(route, tools=tools, timeout_seconds=timeout)
+                    if context:
+                        context.consume_provider_call(estimated_input_tokens)
+                    log_event(
+                        "provider_attempt_started",
+                        trace_id=context.trace_id if context else "unscoped",
+                        role=role,
+                        prompt_id=prompt_spec.prompt_id,
+                        prompt_version=prompt_spec.version,
+                        provider=route.provider,
+                        model=route.model,
+                        retry_number=retry_number,
+                        tools_enabled=bool(tools),
+                    )
+                    response = llm.invoke(messages)
+                    elapsed = round(time.perf_counter() - started_at, 2)
+                    input_tokens, output_tokens, token_source = response_token_usage(response, input_text)
+                    provider_circuits.success(route.label)
+                    record_runtime_metric(
+                        kind="provider", component=route.label, status="success",
+                        latency_ms=round(elapsed * 1000), input_tokens=input_tokens,
+                        output_tokens=output_tokens, token_source=token_source,
+                        prompt_id=prompt_spec.prompt_id, prompt_version=prompt_spec.version,
+                        attributes={"role": role, "fallback_index": len(errors), "retry_number": retry_number},
+                    )
+                    return response, {
+                        "provider": route.provider, "model": route.model, "elapsed_seconds": elapsed,
+                        "input_tokens": input_tokens, "output_tokens": output_tokens,
+                        "token_source": token_source, "prompt_id": prompt_spec.prompt_id,
+                        "prompt_version": prompt_spec.version, "fallback_errors": errors,
+                    }
+                except Exception as exc:
+                    elapsed = round(time.perf_counter() - started_at, 2)
+                    error_type = classify_provider_error(exc)
+                    provider_circuits.failure(route.label, error_type)
+                    record_runtime_metric(
+                        kind="provider", component=route.label,
+                        status="skipped" if error_type == "configuration" else "failed",
+                        latency_ms=round(elapsed * 1000),
+                        input_tokens=estimated_input_tokens if error_type != "configuration" else 0,
+                        output_tokens=0, token_source="estimated",
+                        prompt_id=prompt_spec.prompt_id, prompt_version=prompt_spec.version,
+                        error_type=error_type,
+                        attributes={"role": role, "fallback_index": len(errors), "retry_number": retry_number},
+                    )
+                    errors.append({
+                        "provider": route.provider,
+                        "model": route.model,
+                        "elapsed_seconds": elapsed,
+                        "error_type": error_type,
+                        "retry_number": retry_number,
+                    })
+                    transient = error_type in {"rate_limit", "timeout", "provider_unavailable"}
+                    if not transient or retry_number >= settings.PROVIDER_TRANSIENT_RETRIES:
+                        break
+                    delay = transient_retry_delay(exc, retry_number)
+                    if context and context.remaining_seconds() <= delay:
+                        break
+                    if delay:
+                        time.sleep(delay)
+                if errors and errors[-1]["error_type"] == "budget_exceeded":
                     break
+            if errors and errors[-1]["error_type"] == "budget_exceeded":
+                break
         fallback = AIMessage(
             content=(
                 "I could not reach any configured model provider for this role. "
@@ -271,56 +356,81 @@ class ModelRouter:
         input_text = stringify_messages(messages)
         estimated_input_tokens = estimate_tokens(input_text)
         for route in self.routes_for_role(role):
-            started_at = time.perf_counter()
             context = current_ai_run()
-            try:
-                remaining = context.remaining_seconds() if context else settings.PROVIDER_TIMEOUT_SECONDS
-                timeout = max(0.1, min(settings.PROVIDER_TIMEOUT_SECONDS, remaining))
-                llm = self.llm_for_route(route, tools=tools, timeout_seconds=timeout)
-                if context:
-                    context.consume_provider_call(estimated_input_tokens)
-                yield {"type": "provider_switch", "provider": route.provider, "model": route.model}
+            cooldown = provider_circuits.remaining_cooldown(route.label)
+            if cooldown > 0:
+                record_runtime_metric(
+                    kind="provider", component=route.label, status="skipped",
+                    prompt_id=prompt_spec.prompt_id, prompt_version=prompt_spec.version,
+                    error_type="circuit_open",
+                    attributes={"role": role, "streaming": True, "cooldown_seconds": round(cooldown, 2)},
+                )
+                errors.append({"provider": route.provider, "model": route.model, "error_type": "circuit_open"})
+                continue
+
+            yield {"type": "provider_switch", "provider": route.provider, "model": route.model}
+            for retry_number in range(settings.PROVIDER_TRANSIENT_RETRIES + 1):
+                started_at = time.perf_counter()
                 output = ""
-                for chunk in llm.stream(messages):
-                    content = getattr(chunk, "content", "")
-                    if content:
-                        output += str(content)
-                        yield {"type": "chunk", "content": content}
-                elapsed = round(time.perf_counter() - started_at, 2)
-                record_runtime_metric(
-                    kind="provider",
-                    component=route.label,
-                    status="success",
-                    latency_ms=round(elapsed * 1000),
-                    input_tokens=estimated_input_tokens,
-                    output_tokens=estimate_tokens(output),
-                    token_source="estimated",
-                    prompt_id=prompt_spec.prompt_id,
-                    prompt_version=prompt_spec.version,
-                    attributes={"role": role, "streaming": True, "fallback_index": len(errors)},
-                )
-                yield {"type": "done"}
-                return
-            except Exception as exc:
-                elapsed = round(time.perf_counter() - started_at, 2)
-                error_type = classify_provider_error(exc)
-                record_runtime_metric(
-                    kind="provider",
-                    component=route.label,
-                    status="failed",
-                    latency_ms=round(elapsed * 1000),
-                    input_tokens=estimated_input_tokens,
-                    output_tokens=0,
-                    token_source="estimated",
-                    prompt_id=prompt_spec.prompt_id,
-                    prompt_version=prompt_spec.version,
-                    error_type=error_type,
-                    attributes={"role": role, "streaming": True, "fallback_index": len(errors)},
-                )
-                errors.append({"provider": route.provider, "model": route.model, "elapsed_seconds": elapsed, "error_type": error_type})
-                yield {"type": "provider_switch", "provider": route.provider, "model": route.model, "error_type": error_type}
-                if error_type == "budget_exceeded":
+                emitted_content = False
+                try:
+                    remaining = context.remaining_seconds() if context else settings.PROVIDER_TIMEOUT_SECONDS
+                    timeout = max(0.1, min(settings.PROVIDER_TIMEOUT_SECONDS, remaining))
+                    llm = self.llm_for_route(route, tools=tools, timeout_seconds=timeout)
+                    if context:
+                        context.consume_provider_call(estimated_input_tokens)
+                    for chunk in llm.stream(messages):
+                        content = getattr(chunk, "content", "")
+                        if content:
+                            emitted_content = True
+                            output += str(content)
+                            yield {"type": "chunk", "content": content}
+                    elapsed = round(time.perf_counter() - started_at, 2)
+                    provider_circuits.success(route.label)
+                    record_runtime_metric(
+                        kind="provider", component=route.label, status="success",
+                        latency_ms=round(elapsed * 1000), input_tokens=estimated_input_tokens,
+                        output_tokens=estimate_tokens(output), token_source="estimated",
+                        prompt_id=prompt_spec.prompt_id, prompt_version=prompt_spec.version,
+                        attributes={"role": role, "streaming": True, "fallback_index": len(errors), "retry_number": retry_number},
+                    )
+                    yield {"type": "done"}
+                    return
+                except Exception as exc:
+                    elapsed = round(time.perf_counter() - started_at, 2)
+                    error_type = classify_provider_error(exc)
+                    provider_circuits.failure(route.label, error_type)
+                    record_runtime_metric(
+                        kind="provider", component=route.label,
+                        status="skipped" if error_type == "configuration" else "failed",
+                        latency_ms=round(elapsed * 1000), input_tokens=estimated_input_tokens,
+                        output_tokens=estimate_tokens(output), token_source="estimated",
+                        prompt_id=prompt_spec.prompt_id, prompt_version=prompt_spec.version,
+                        error_type=error_type,
+                        attributes={"role": role, "streaming": True, "fallback_index": len(errors), "retry_number": retry_number},
+                    )
+                    errors.append({
+                        "provider": route.provider, "model": route.model,
+                        "elapsed_seconds": elapsed, "error_type": error_type,
+                        "retry_number": retry_number,
+                    })
+                    transient = error_type in {"rate_limit", "timeout", "provider_unavailable"}
+                    if emitted_content or not transient or retry_number >= settings.PROVIDER_TRANSIENT_RETRIES:
+                        break
+                    delay = transient_retry_delay(exc, retry_number)
+                    if context and context.remaining_seconds() <= delay:
+                        break
+                    if delay:
+                        time.sleep(delay)
+                if errors and errors[-1]["error_type"] == "budget_exceeded":
                     break
+            if errors:
+                yield {
+                    "type": "provider_switch", "provider": route.provider,
+                    "model": route.model, "error_type": errors[-1]["error_type"],
+                }
+            if errors and errors[-1]["error_type"] == "budget_exceeded":
+                break
         yield {
             "type": "error",
             "content": "All configured providers failed. Check API keys, model names, and quota limits.",

@@ -69,7 +69,9 @@ from utils.storage import (
 )
 from utils.readiness import critical_config_errors
 from utils.ingestion_jobs import (
+    cancel_ingestion_job,
     enqueue_ingestion_job,
+    job_events_payload,
     job_payload,
     require_user_job,
     retry_failed_job,
@@ -431,6 +433,16 @@ async def get_ingestion_job(job_id: int, current_user=Depends(get_current_user),
 @app.post("/api/jobs/{job_id}/retry")
 async def retry_ingestion_job(job_id: int, current_user=Depends(get_current_user), db: Session = Depends(get_db)):
     return job_payload(retry_failed_job(db, job_id, current_user.id))
+
+
+@app.post("/api/jobs/{job_id}/cancel")
+async def cancel_job(job_id: int, current_user=Depends(get_current_user), db: Session = Depends(get_db)):
+    return job_payload(cancel_ingestion_job(db, job_id, current_user.id))
+
+
+@app.get("/api/jobs/{job_id}/events")
+async def get_job_events(job_id: int, current_user=Depends(get_current_user), db: Session = Depends(get_db)):
+    return {"events": job_events_payload(db, job_id, current_user.id)}
 
 
 @app.get("/api/projects")

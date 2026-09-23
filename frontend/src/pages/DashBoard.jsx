@@ -13,6 +13,8 @@ import {
   UploadCloud,
   AlertCircle,
   Trash2,
+  RotateCcw,
+  Square,
 } from "lucide-react";
 import { formatApiError } from "../utils/apiError";
 
@@ -90,6 +92,7 @@ export default function Dashboard() {
   const [selectedFile, setSelectedFile] = useState(null);
   const [error, setError] = useState("");
   const [isPreparingUpload, setIsPreparingUpload] = useState(false);
+  const [activeJobAction, setActiveJobAction] = useState(null);
 
   const pollIntervalRef = useRef(null);
   const isPollingRef = useRef(false);
@@ -172,7 +175,7 @@ export default function Dashboard() {
         setProjects(fetched);
 
         const stillProcessing = fetched.some(
-          (p) => p.status !== "ready" && p.status !== "error",
+          (p) => !["ready", "error", "cancelled"].includes(p.status),
         );
         if (!stillProcessing) {
           stopPolling();
@@ -180,14 +183,14 @@ export default function Dashboard() {
       } catch (err) {
         console.error("Polling error:", err);
       }
-    }, 60000);
+    }, 5000);
   }, [stopPolling]);
 
   useEffect(() => {
     async function initialize() {
       const fetched = await fetchProjects();
       const hasProcessing = fetched.some(
-        (p) => p.status !== "ready" && p.status !== "error",
+        (p) => !["ready", "error", "cancelled"].includes(p.status),
       );
       if (hasProcessing) startPolling();
     }
@@ -214,6 +217,23 @@ export default function Dashboard() {
     } catch (err) {
       console.error("Failed to delete project", err);
       alert("An error occurred while trying to delete the project.");
+    }
+  };
+
+  const handleJobAction = async (e, project, action) => {
+    e.stopPropagation();
+    if (!project.job_id) return;
+    setActiveJobAction(`${action}-${project.job_id}`);
+    try {
+      await axios.post(
+        `${import.meta.env.VITE_API_URL}/jobs/${project.job_id}/${action}`,
+      );
+      await fetchProjects();
+      if (action === "retry") startPolling();
+    } catch (err) {
+      alert(formatApiError(err, `Failed to ${action} ingestion.`));
+    } finally {
+      setActiveJobAction(null);
     }
   };
 
@@ -342,7 +362,9 @@ export default function Dashboard() {
             {projects.map((project, idx) => {
               const isReady = project.status === "ready";
               const isError = project.status === "error";
-              const isProcessing = !isReady && !isError;
+              const isCancelled = project.status === "cancelled";
+              const isProcessing = !isReady && !isError && !isCancelled;
+              const canRetry = (isError || isCancelled) && project.job_id;
 
               return (
                 <div
@@ -353,12 +375,12 @@ export default function Dashboard() {
                   className={`group bg-zinc-900 border rounded-xl p-6 flex flex-col transition-all relative ${
                     isReady
                       ? "cursor-pointer border-zinc-800 hover:border-emerald-500/50 hover:shadow-[0_0_20px_rgba(16,185,129,0.05)]"
-                      : isError
+                      : isError || isCancelled
                         ? "border-red-500/30 opacity-75"
                         : "border-zinc-800 opacity-75 cursor-not-allowed"
                   }`}
                 >
-                  {!isProcessing && (
+                  {!isProcessing && !canRetry && (
                     <button
                       onClick={(e) => handleDelete(e, project.name)}
                       className="absolute top-4 right-4 p-2 bg-zinc-950/80 text-zinc-500 hover:text-red-400 rounded-md opacity-0 group-hover:opacity-100 transition-all border border-zinc-800 hover:border-red-500/50 z-10"
@@ -381,7 +403,7 @@ export default function Dashboard() {
                     {isReady && (
                       <ChevronRight className="w-5 h-5 text-zinc-600 group-hover:text-emerald-400 transition-colors mr-8" />
                     )}
-                    {isError && (
+                    {(isError || isCancelled) && (
                       <AlertCircle className="w-5 h-5 text-red-500 mr-8" />
                     )}
                   </div>
@@ -394,7 +416,7 @@ export default function Dashboard() {
                     className={`text-sm mt-1 font-medium ${
                       isProcessing
                         ? "text-emerald-500 animate-pulse"
-                        : isError
+                        : isError || isCancelled
                           ? "text-red-400"
                           : "text-zinc-500"
                     }`}
@@ -402,9 +424,58 @@ export default function Dashboard() {
                     {isProcessing
                       ? project.status
                       : isError
-                        ? "Ingestion Failed"
+                        ? "Ingestion failed"
+                        : isCancelled
+                          ? "Ingestion cancelled"
                         : "Ready for analysis"}
                   </p>
+
+                  <p className="text-xs text-zinc-500 mt-2 min-h-8">
+                    {project.message || project.stage || ""}
+                  </p>
+
+                  {isProcessing && (
+                    <div className="mt-4">
+                      <div className="h-1.5 rounded bg-zinc-800 overflow-hidden">
+                        <div
+                          className="h-full bg-emerald-500 transition-all"
+                          style={{ width: `${Math.max(4, project.progress || 0)}%` }}
+                        />
+                      </div>
+                      <div className="flex justify-between items-center mt-3">
+                        <span className="text-xs text-zinc-500">
+                          Attempt {project.attempt_count || 0}/{project.max_attempts || 0}
+                        </span>
+                        {project.job_id && (
+                          <button
+                            onClick={(e) => handleJobAction(e, project, "cancel")}
+                            disabled={activeJobAction === `cancel-${project.job_id}`}
+                            className="flex items-center gap-1 text-xs text-zinc-400 hover:text-red-400 disabled:opacity-50"
+                          >
+                            <Square className="w-3 h-3" /> Cancel
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {canRetry && (
+                    <div className="flex gap-3 mt-4">
+                      <button
+                        onClick={(e) => handleJobAction(e, project, "retry")}
+                        disabled={activeJobAction === `retry-${project.job_id}`}
+                        className="flex items-center gap-1 text-sm text-emerald-400 hover:text-emerald-300 disabled:opacity-50"
+                      >
+                        <RotateCcw className="w-4 h-4" /> Retry
+                      </button>
+                      <button
+                        onClick={(e) => handleDelete(e, project.name)}
+                        className="flex items-center gap-1 text-sm text-zinc-500 hover:text-red-400"
+                      >
+                        <Trash2 className="w-4 h-4" /> Delete
+                      </button>
+                    </div>
+                  )}
                 </div>
               );
             })}

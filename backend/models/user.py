@@ -117,6 +117,8 @@ class IngestionJobModel(Base):
     attempt_count = Column(Integer, nullable=False, default=0)
     max_attempts = Column(Integer, nullable=False, default=3)
     heartbeat_at = Column(DateTime(timezone=True), nullable=True)
+    cancel_requested_at = Column(DateTime(timezone=True), nullable=True)
+    next_attempt_at = Column(DateTime(timezone=True), nullable=True)
     started_at = Column(DateTime(timezone=True), nullable=True)
     finished_at = Column(DateTime(timezone=True), nullable=True)
     error_code = Column(String, nullable=True)
@@ -125,6 +127,23 @@ class IngestionJobModel(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
     project = relationship("ProjectModel", back_populates="ingestion_job")
+    events = relationship("IngestionJobEventModel", back_populates="job", cascade="all, delete-orphan")
+
+
+class IngestionJobEventModel(Base):
+    __tablename__ = "ingestion_job_events"
+    __table_args__ = (Index("ix_ingestion_job_events_job_created", "job_id", "created_at"),)
+
+    id = Column(Integer, primary_key=True)
+    job_id = Column(Integer, ForeignKey("ingestion_jobs.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(String, index=True, nullable=False)
+    from_status = Column(String, nullable=True)
+    to_status = Column(String, nullable=False)
+    stage = Column(String, nullable=True)
+    message = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    job = relationship("IngestionJobModel", back_populates="events")
 
 
 class RuntimeMetricModel(Base):

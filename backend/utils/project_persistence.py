@@ -370,6 +370,7 @@ def ensure_retrieval_cache(db: Session, user_id: int | str, slug: str) -> None:
 
 
 def project_status_payload(project: ProjectModel) -> dict:
+    job = project.ingestion_job
     return {
         "status": project.status,
         "stage": project.stage,
@@ -379,6 +380,12 @@ def project_status_payload(project: ProjectModel) -> dict:
         "vector_index_status": project.vector_index_status,
         "created_at": project.created_at.isoformat() if project.created_at else None,
         "updated_at": project.updated_at.isoformat() if project.updated_at else None,
+        "job_id": job.id if job else None,
+        "job_status": job.status if job else None,
+        "attempt_count": job.attempt_count if job else 0,
+        "max_attempts": job.max_attempts if job else 0,
+        "next_attempt_at": job.next_attempt_at.isoformat() if job and job.next_attempt_at else None,
+        "cancel_requested_at": job.cancel_requested_at.isoformat() if job and job.cancel_requested_at else None,
     }
 
 

@@ -33,13 +33,22 @@ from agents.debugger import debugger_node
 from agents.supervisor import supervisor_node
 from graph_chat import route_supervisor
 from providers.local_embeddings import LocalHashingEmbeddings
-from providers.router import ModelRoute, ModelRouter, classify_provider_error
+from providers.router import ModelRoute, ModelRouter, classify_provider_error, provider_circuits, transient_retry_delay
 from config import settings
 from main import app, release_local_ingestion_slot, reserve_local_ingestion_slot
-from models.user import IngestionJobModel, ProjectModel, RuntimeMetricModel
+from models.user import IngestionJobEventModel, IngestionJobModel, ProjectModel, RuntimeMetricModel
 from utils.database import SessionLocal, build_engine_options, engine
-from utils.project_persistence import enforce_user_project_quota, reserve_project_ingestion
-from utils.ingestion_jobs import _recover_stale_jobs, claim_next_job, enqueue_ingestion_job, execute_job
+from utils.project_persistence import enforce_user_project_quota, project_status_payload, reserve_project_ingestion
+from utils.ingestion_jobs import (
+    _recover_stale_jobs,
+    cancel_ingestion_job,
+    claim_next_job,
+    enqueue_ingestion_job,
+    execute_job,
+    job_events_payload,
+    retry_failed_job,
+)
+from utils.job_control import IngestionCancelled, raise_if_cancelled
 from utils.rate_limit import SlidingWindowLimiter
 from utils.auth import UserSignUp
 from utils.readiness import critical_config_errors
@@ -273,6 +282,7 @@ class HealthEndpointTests(unittest.TestCase):
             self.assertEqual(job.status, "retryable")
             self.assertEqual(job.project.status, "retryable")
             self.assertEqual(job.error_code, "stale_worker")
+            self.assertIsNotNone(job.next_attempt_at)
         finally:
             db.delete(db.get(ProjectModel, project_id))
             db.commit()
@@ -433,6 +443,48 @@ class HealthEndpointTests(unittest.TestCase):
             db.commit()
             db.close()
 
+    def test_queued_job_can_be_cancelled_and_retried_with_audit_events(self):
+        db = SessionLocal()
+        project = reserve_project_ingestion(db, "cancel-user", "cancel-project", "Cancel Project", "git")
+        job = enqueue_ingestion_job(db, project)
+        job_id, project_id = job.id, project.id
+        try:
+            cancelled = cancel_ingestion_job(db, job_id, "cancel-user")
+            self.assertEqual(cancelled.status, "cancelled")
+            self.assertEqual(cancelled.project.status, "cancelled")
+            with self.assertRaises(IngestionCancelled):
+                raise_if_cancelled(job_id)
+
+            retried = retry_failed_job(db, job_id, "cancel-user")
+            self.assertEqual(retried.status, "queued")
+            payload = project_status_payload(retried.project)
+            self.assertEqual(payload["job_id"], job_id)
+            self.assertEqual(payload["job_status"], "queued")
+            events = job_events_payload(db, job_id, "cancel-user")
+            self.assertEqual([event["to_status"] for event in events], ["queued", "cancelled", "queued"])
+        finally:
+            db.delete(db.get(ProjectModel, project_id))
+            db.commit()
+            db.close()
+
+    def test_delayed_retry_is_not_claimed_before_due_time(self):
+        db = SessionLocal()
+        project = reserve_project_ingestion(db, "delay-user", "delay-project", "Delay Project", "git")
+        job = enqueue_ingestion_job(db, project)
+        job.status = "retryable"
+        job.next_attempt_at = datetime.now(timezone.utc) + timedelta(minutes=5)
+        job_id, project_id = job.id, project.id
+        db.commit()
+        try:
+            self.assertIsNone(claim_next_job())
+            job.next_attempt_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+            db.commit()
+            self.assertEqual(claim_next_job(), job_id)
+        finally:
+            db.delete(db.get(ProjectModel, project_id))
+            db.commit()
+            db.close()
+
     def test_provider_metadata_records_prompt_tokens_and_trace_metric(self):
         response = AIMessage(content="answer", usage_metadata={"input_tokens": 12, "output_tokens": 4, "total_tokens": 16})
         llm = MagicMock()
@@ -478,6 +530,51 @@ class HealthEndpointTests(unittest.TestCase):
         self.assertEqual(classify_provider_error(RuntimeError("429 quota exceeded")), "rate_limit")
         self.assertEqual(classify_provider_error(TimeoutError("request timed out")), "timeout")
         self.assertEqual(classify_provider_error(RuntimeError("invalid API key")), "authentication")
+
+    def test_provider_retries_transient_failure_then_succeeds(self):
+        response = AIMessage(content="recovered")
+        llm = MagicMock()
+        llm.invoke.side_effect = [TimeoutError("request timed out"), response]
+        router = ModelRouter()
+        provider_circuits.clear()
+        with (
+            patch.object(router, "routes_for_role", return_value=[ModelRoute("groq", "retry-model")]),
+            patch.object(router, "llm_for_route", return_value=llm),
+            patch("providers.router.time.sleep"),
+            patch.object(settings, "PROVIDER_TRANSIENT_RETRIES", 1),
+            patch.object(settings, "PROVIDER_BACKOFF_BASE_SECONDS", 0.01),
+        ):
+            answer, metadata = router.invoke_chat("supervisor_reasoning", [HumanMessage(content="question")])
+        self.assertEqual(answer.content, "recovered")
+        self.assertEqual(metadata["fallback_errors"][0]["error_type"], "timeout")
+        self.assertEqual(llm.invoke.call_count, 2)
+
+    def test_provider_retry_after_header_is_respected_and_bounded(self):
+        response = MagicMock(headers={"Retry-After": "120"})
+        error = RuntimeError("429 quota exceeded")
+        error.response = response
+        with patch.object(settings, "PROVIDER_MAX_RETRY_AFTER_SECONDS", 8):
+            self.assertEqual(transient_retry_delay(error, 0), 8)
+
+    def test_provider_circuit_skips_repeatedly_failing_route(self):
+        llm = MagicMock()
+        llm.invoke.side_effect = TimeoutError("request timed out")
+        router = ModelRouter()
+        route = ModelRoute("groq", "broken-model")
+        provider_circuits.clear()
+        with (
+            patch.object(router, "routes_for_role", return_value=[route]),
+            patch.object(router, "llm_for_route", return_value=llm),
+            patch.object(settings, "PROVIDER_TRANSIENT_RETRIES", 0),
+            patch.object(settings, "PROVIDER_CIRCUIT_FAILURES", 1),
+            patch.object(settings, "PROVIDER_CIRCUIT_COOLDOWN_SECONDS", 60),
+        ):
+            _first, first_metadata = router.invoke_chat("supervisor_reasoning", [HumanMessage(content="question")])
+            _second, second_metadata = router.invoke_chat("supervisor_reasoning", [HumanMessage(content="question")])
+        self.assertEqual(first_metadata["fallback_errors"][0]["error_type"], "timeout")
+        self.assertEqual(second_metadata["fallback_errors"][0]["error_type"], "circuit_open")
+        self.assertEqual(llm.invoke.call_count, 1)
+        provider_circuits.clear()
 
     def test_retrieval_evaluation_scores_recall_and_reciprocal_rank(self):
         score = score_ranking(["billing.py"], ["utils.py", "billing.py", "models.py"], k=2)

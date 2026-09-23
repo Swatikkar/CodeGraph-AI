@@ -18,8 +18,16 @@ def critical_config_errors() -> list[str]:
         settings.AGENT_MAX_TOOL_CALLS,
         settings.AGENT_MAX_DUPLICATE_TOOL_CALLS,
         settings.AI_METRICS_RETENTION_DAYS,
+        settings.PROVIDER_CIRCUIT_FAILURES,
+        settings.PROVIDER_CIRCUIT_COOLDOWN_SECONDS,
+        settings.PROVIDER_BACKOFF_BASE_SECONDS,
+        settings.PROVIDER_MAX_RETRY_AFTER_SECONDS,
+        settings.INGESTION_RETRY_BASE_SECONDS,
+        settings.INGESTION_RETRY_MAX_SECONDS,
     )):
         errors.append("ai_runtime_limits_must_be_positive")
+    if settings.PROVIDER_TRANSIENT_RETRIES < 0:
+        errors.append("provider_transient_retries_must_be_non_negative")
     try:
         pricing = json.loads(settings.AI_PROVIDER_PRICING_JSON or "{}")
         if not isinstance(pricing, dict):
