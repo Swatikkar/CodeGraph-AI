@@ -7,6 +7,10 @@ from typing import Iterable
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
 from config import settings
+from prompts import prompt_spec_for
+from utils.ai_runtime import AIBudgetExceeded, current_ai_run, estimate_tokens
+from utils.observability import log_event
+from utils.runtime_metrics import record_runtime_metric
 
 
 ROLE_TO_SETTING = {
@@ -67,13 +71,37 @@ def stringify_messages(messages: Iterable[BaseMessage | tuple | dict | str]) -> 
     return "\n\n".join(parts)
 
 
-def _short_error(exc: Exception, limit: int = 500) -> str:
-    message = str(exc).replace("\n", " ").strip()
-    return message[:limit] + ("..." if len(message) > limit else "")
+def classify_provider_error(exc: Exception) -> str:
+    if isinstance(exc, AIBudgetExceeded):
+        return "budget_exceeded"
+    message = str(exc).lower()
+    status_code = getattr(exc, "status_code", None)
+    if "not configured" in message or "unsupported" in message:
+        return "configuration"
+    if status_code == 429 or "429" in message or "rate limit" in message or "quota" in message:
+        return "rate_limit"
+    if status_code in {401, 403} or "api key" in message or "unauthorized" in message or "authentication" in message:
+        return "authentication"
+    if status_code == 404 or "model_not_found" in message or "not found" in message:
+        return "invalid_model"
+    if "timeout" in message or "timed out" in message:
+        return "timeout"
+    if status_code and status_code >= 500:
+        return "provider_unavailable"
+    return "provider_error"
 
 
-def _log_provider(message: str):
-    print(f"[model-router] {message}", flush=True)
+def response_token_usage(response: AIMessage, input_text: str) -> tuple[int, int, str]:
+    usage = getattr(response, "usage_metadata", None) or {}
+    input_tokens = usage.get("input_tokens") or usage.get("prompt_tokens")
+    output_tokens = usage.get("output_tokens") or usage.get("completion_tokens")
+    if input_tokens is None or output_tokens is None:
+        token_usage = (getattr(response, "response_metadata", None) or {}).get("token_usage", {})
+        input_tokens = input_tokens or token_usage.get("prompt_tokens") or token_usage.get("input_tokens")
+        output_tokens = output_tokens or token_usage.get("completion_tokens") or token_usage.get("output_tokens")
+    if input_tokens is not None and output_tokens is not None:
+        return int(input_tokens), int(output_tokens), "provider"
+    return estimate_tokens(input_text), estimate_tokens(str(response.content or "")), "estimated"
 
 
 class ModelRouter:
@@ -81,9 +109,10 @@ class ModelRouter:
         setting_name = ROLE_TO_SETTING.get(role, "SUPERVISOR_REASONING_MODELS")
         return parse_routes(getattr(settings, setting_name))
 
-    def llm_for_route(self, route: ModelRoute, tools=None):
+    def llm_for_route(self, route: ModelRoute, tools=None, timeout_seconds: float | None = None):
         provider = route.provider
         model = route.model
+        timeout = timeout_seconds or settings.PROVIDER_TIMEOUT_SECONDS
 
         if provider == "groq":
             if not settings.GROQ_API_KEY:
@@ -94,8 +123,9 @@ class ModelRouter:
                 model=model,
                 api_key=settings.GROQ_API_KEY,
                 temperature=settings.MODEL_TEMPERATURE,
-                timeout=settings.PROVIDER_TIMEOUT_SECONDS,
+                timeout=timeout,
                 max_retries=settings.PROVIDER_MAX_RETRIES,
+                max_tokens=settings.AI_MAX_OUTPUT_TOKENS,
             )
         elif provider == "ollama":
             from langchain_ollama import ChatOllama
@@ -105,6 +135,7 @@ class ModelRouter:
                 base_url=settings.OLLAMA_BASE_URL,
                 temperature=settings.MODEL_TEMPERATURE,
                 keep_alive=300,
+                num_predict=settings.AI_MAX_OUTPUT_TOKENS,
             )
         elif provider == "gemini":
             if not settings.GEMINI_API_KEY:
@@ -115,8 +146,9 @@ class ModelRouter:
                 model=model,
                 google_api_key=settings.GEMINI_API_KEY,
                 temperature=settings.MODEL_TEMPERATURE,
-                timeout=settings.PROVIDER_TIMEOUT_SECONDS,
+                timeout=timeout,
                 max_retries=settings.PROVIDER_MAX_RETRIES,
+                max_output_tokens=settings.AI_MAX_OUTPUT_TOKENS,
             )
         elif provider in {"openrouter", "nvidia"}:
             api_key = settings.OPENROUTER_API_KEY if provider == "openrouter" else settings.NVIDIA_API_KEY
@@ -130,8 +162,9 @@ class ModelRouter:
                 api_key=api_key,
                 base_url=base_url,
                 temperature=settings.MODEL_TEMPERATURE,
-                timeout=settings.PROVIDER_TIMEOUT_SECONDS,
+                timeout=timeout,
                 max_retries=settings.PROVIDER_MAX_RETRIES,
+                max_tokens=settings.AI_MAX_OUTPUT_TOKENS,
             )
         else:
             raise ProviderError(provider, model, f"Unsupported chat provider: {provider}")
@@ -145,64 +178,149 @@ class ModelRouter:
 
     def invoke_chat(self, role: str, messages: list[BaseMessage], tools=None) -> tuple[AIMessage, dict]:
         errors = []
+        prompt_spec = prompt_spec_for(role)
+        input_text = stringify_messages(messages)
+        estimated_input_tokens = estimate_tokens(input_text)
         for route in self.routes_for_role(role):
             started_at = time.perf_counter()
-            tool_note = " with tools" if tools else ""
-            _log_provider(f"{role}: trying {route.label}{tool_note}")
+            context = current_ai_run()
             try:
-                llm = self.llm_for_route(route, tools=tools)
+                remaining = context.remaining_seconds() if context else settings.PROVIDER_TIMEOUT_SECONDS
+                timeout = max(0.1, min(settings.PROVIDER_TIMEOUT_SECONDS, remaining))
+                llm = self.llm_for_route(route, tools=tools, timeout_seconds=timeout)
+                if context:
+                    context.consume_provider_call(estimated_input_tokens)
+                log_event(
+                    "provider_attempt_started",
+                    trace_id=context.trace_id if context else "unscoped",
+                    role=role,
+                    prompt_id=prompt_spec.prompt_id,
+                    prompt_version=prompt_spec.version,
+                    provider=route.provider,
+                    model=route.model,
+                    tools_enabled=bool(tools),
+                )
                 response = llm.invoke(messages)
                 elapsed = round(time.perf_counter() - started_at, 2)
-                _log_provider(f"Provider selected successfully for {role}: {route.label} in {elapsed}s")
+                input_tokens, output_tokens, token_source = response_token_usage(response, input_text)
+                record_runtime_metric(
+                    kind="provider",
+                    component=route.label,
+                    status="success",
+                    latency_ms=round(elapsed * 1000),
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    token_source=token_source,
+                    prompt_id=prompt_spec.prompt_id,
+                    prompt_version=prompt_spec.version,
+                    attributes={"role": role, "fallback_index": len(errors)},
+                )
                 metadata = {
                     "provider": route.provider,
                     "model": route.model,
                     "elapsed_seconds": elapsed,
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "token_source": token_source,
+                    "prompt_id": prompt_spec.prompt_id,
+                    "prompt_version": prompt_spec.version,
                     "fallback_errors": errors,
                 }
                 return response, metadata
             except Exception as exc:
                 elapsed = round(time.perf_counter() - started_at, 2)
-                error = _short_error(exc)
-                _log_provider(f"Provider failed/unavailable for {role}: {route.label} after {elapsed}s: {error}")
-                _log_provider(f"Trying next provider for {role}")
+                error_type = classify_provider_error(exc)
+                record_runtime_metric(
+                    kind="provider",
+                    component=route.label,
+                    status="skipped" if error_type == "configuration" else "failed",
+                    latency_ms=round(elapsed * 1000),
+                    input_tokens=estimated_input_tokens if error_type != "configuration" else 0,
+                    output_tokens=0,
+                    token_source="estimated",
+                    prompt_id=prompt_spec.prompt_id,
+                    prompt_version=prompt_spec.version,
+                    error_type=error_type,
+                    attributes={"role": role, "fallback_index": len(errors)},
+                )
                 errors.append({
                     "provider": route.provider,
                     "model": route.model,
                     "elapsed_seconds": elapsed,
-                    "error": error,
+                    "error_type": error_type,
                 })
+                if error_type == "budget_exceeded":
+                    break
         fallback = AIMessage(
             content=(
                 "I could not reach any configured model provider for this role. "
                 "Please add at least one valid API key/model in backend/.env."
             )
         )
-        _log_provider(f"{role}: all configured routes failed")
-        return fallback, {"provider": "none", "model": "none", "fallback_errors": errors}
+        return fallback, {
+            "provider": "none",
+            "model": "none",
+            "prompt_id": prompt_spec.prompt_id,
+            "prompt_version": prompt_spec.version,
+            "fallback_errors": errors,
+        }
 
     def stream_chat(self, role: str, messages: list[BaseMessage], tools=None):
         errors = []
+        prompt_spec = prompt_spec_for(role)
+        input_text = stringify_messages(messages)
+        estimated_input_tokens = estimate_tokens(input_text)
         for route in self.routes_for_role(role):
             started_at = time.perf_counter()
-            _log_provider(f"{role}: streaming {route.label}")
+            context = current_ai_run()
             try:
-                llm = self.llm_for_route(route, tools=tools)
+                remaining = context.remaining_seconds() if context else settings.PROVIDER_TIMEOUT_SECONDS
+                timeout = max(0.1, min(settings.PROVIDER_TIMEOUT_SECONDS, remaining))
+                llm = self.llm_for_route(route, tools=tools, timeout_seconds=timeout)
+                if context:
+                    context.consume_provider_call(estimated_input_tokens)
                 yield {"type": "provider_switch", "provider": route.provider, "model": route.model}
+                output = ""
                 for chunk in llm.stream(messages):
                     content = getattr(chunk, "content", "")
                     if content:
+                        output += str(content)
                         yield {"type": "chunk", "content": content}
                 elapsed = round(time.perf_counter() - started_at, 2)
-                _log_provider(f"{role}: stream success {route.label} in {elapsed}s")
+                record_runtime_metric(
+                    kind="provider",
+                    component=route.label,
+                    status="success",
+                    latency_ms=round(elapsed * 1000),
+                    input_tokens=estimated_input_tokens,
+                    output_tokens=estimate_tokens(output),
+                    token_source="estimated",
+                    prompt_id=prompt_spec.prompt_id,
+                    prompt_version=prompt_spec.version,
+                    attributes={"role": role, "streaming": True, "fallback_index": len(errors)},
+                )
                 yield {"type": "done"}
                 return
             except Exception as exc:
                 elapsed = round(time.perf_counter() - started_at, 2)
-                error = _short_error(exc)
-                _log_provider(f"{role}: stream failed {route.label} after {elapsed}s: {error}")
-                errors.append({"provider": route.provider, "model": route.model, "elapsed_seconds": elapsed, "error": error})
-                yield {"type": "provider_switch", "provider": route.provider, "model": route.model, "error": error}
+                error_type = classify_provider_error(exc)
+                record_runtime_metric(
+                    kind="provider",
+                    component=route.label,
+                    status="failed",
+                    latency_ms=round(elapsed * 1000),
+                    input_tokens=estimated_input_tokens,
+                    output_tokens=0,
+                    token_source="estimated",
+                    prompt_id=prompt_spec.prompt_id,
+                    prompt_version=prompt_spec.version,
+                    error_type=error_type,
+                    attributes={"role": role, "streaming": True, "fallback_index": len(errors)},
+                )
+                errors.append({"provider": route.provider, "model": route.model, "elapsed_seconds": elapsed, "error_type": error_type})
+                yield {"type": "provider_switch", "provider": route.provider, "model": route.model, "error_type": error_type}
+                if error_type == "budget_exceeded":
+                    break
         yield {
             "type": "error",
             "content": "All configured providers failed. Check API keys, model names, and quota limits.",
@@ -230,7 +348,6 @@ class ModelRouter:
                 if route.provider == "local" and route.model == "hashing-v1":
                     from providers.local_embeddings import LocalHashingEmbeddings
 
-                    _log_provider(f"embedding: selected {route.label}")
                     return LocalHashingEmbeddings()
                 if route.provider == "gemini":
                     if not settings.GEMINI_API_KEY:

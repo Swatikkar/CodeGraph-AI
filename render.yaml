@@ -89,6 +89,22 @@ services:
         value: "20"
       - key: RETRIEVAL_MAX_INDEX_DOCUMENTS
         value: "2000"
+      - key: AI_MAX_PROVIDER_CALLS
+        value: "4"
+      - key: AI_MAX_TOTAL_INPUT_TOKENS
+        value: "60000"
+      - key: AI_MAX_OUTPUT_TOKENS
+        value: "4096"
+      - key: AI_MAX_REQUEST_SECONDS
+        value: "75"
+      - key: AGENT_MAX_TOOL_CALLS
+        value: "4"
+      - key: AGENT_MAX_DUPLICATE_TOOL_CALLS
+        value: "1"
+      - key: AI_METRICS_RETENTION_DAYS
+        value: "30"
+      - key: AI_PROVIDER_PRICING_JSON
+        value: "{}"
       - key: SUPERVISOR_REASONING_MODELS
         value: groq:openai/gpt-oss-120b,groq:openai/gpt-oss-20b,openrouter:nvidia/nemotron-3-ultra-550b-a55b:free
       - key: DEBUGGER_CODING_MODELS

@@ -16,6 +16,7 @@ from providers import model_router
 from utils.chroma import VECTOR_COLLECTION_NAME, ensure_chroma_defaults
 from utils.secrets import redact_secrets
 from utils.storage import project_root
+from utils.runtime_metrics import record_runtime_metric
 
 
 _vectorstore_cache: dict[str, Chroma] = {}
@@ -151,10 +152,18 @@ def _bm25_rank(query: str, documents: list[Document]) -> list[Document]:
 
 
 def hybrid_retrieve(query: str, project_name: str, top_n: int = 5) -> str:
+    started_at = time.perf_counter()
     vectorstore = get_vectorstore(project_name)
     vector_results = vectorstore.similarity_search(query, k=settings.RETRIEVAL_VECTOR_CANDIDATES)
     lexical_results = _bm25_rank(query, _all_index_documents(vectorstore))
     if not vector_results and not lexical_results:
+        record_runtime_metric(
+            kind="retrieval",
+            component="chroma_bm25",
+            status="empty",
+            latency_ms=round((time.perf_counter() - started_at) * 1000),
+            attributes={"vector_candidates": 0, "lexical_candidates": 0, "returned": 0},
+        )
         return "No relevant code found in the database."
 
     query_tokens = clean_tokens(query)
@@ -183,6 +192,17 @@ def hybrid_retrieve(query: str, project_name: str, top_n: int = 5) -> str:
             f"\n--- Context Block {idx} (File: {source}, Language: {language}, Confidence: {confidence:.3f}) ---\n"
             f"{redact_secrets(doc.page_content)}\n"
         )
+    record_runtime_metric(
+        kind="retrieval",
+        component="chroma_bm25",
+        status="success",
+        latency_ms=round((time.perf_counter() - started_at) * 1000),
+        attributes={
+            "vector_candidates": len(vector_results),
+            "lexical_candidates": len(lexical_results),
+            "returned": len(context),
+        },
+    )
     return "\n".join(context)
 
 
@@ -242,6 +262,13 @@ def retrieve_code_context(query: str, project_name: str, top_n: int = 5) -> str:
         query_embedding = np.array(embeddings.embed_query(query))
         cached = check_semantic_cache(query_embedding, project_name)
         if cached is not None:
+            record_runtime_metric(
+                kind="retrieval",
+                component="semantic_cache",
+                status="hit",
+                latency_ms=0,
+                attributes={"returned": cached.count("--- Context Block")},
+            )
             return cached
 
         result = hybrid_retrieve(query, project_name, top_n)

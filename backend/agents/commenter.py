@@ -4,6 +4,7 @@ from config import settings
 from providers import model_router
 from tools.ast_parser import EXTENSION_MAP, parse_code_file
 from utils.secrets import contains_secret, redact_secrets
+from utils.prompt_security import UNTRUSTED_CONTEXT_RULE, wrap_untrusted_context
 
 
 CHUNK_SYSTEM = """You are an expert Senior {language} Developer. Add one clear documentation comment explaining the purpose of the given class or function.
@@ -14,6 +15,7 @@ Rules:
 3. Do not add conversational text.
 4. Output only valid code.
 5. Preserve indentation and original behavior.
+6. {untrusted_context_rule}
 """
 
 FILE_SYSTEM = """You are an expert Senior {language} Developer. Write one brief top-level summary comment explaining this file's purpose.
@@ -22,6 +24,7 @@ Rules:
 1. Use this exact comment style: {comment_style}
 2. Keep it to 1-3 sentences.
 3. Do not output markdown or conversational text.
+4. {untrusted_context_rule}
 """
 
 
@@ -35,8 +38,12 @@ def generate_chunk_comments(code_chunk: str, language: str, comment_style: str) 
     try:
         result, _metadata = model_router.invoke_text(
             "commenter_code_docs",
-            CHUNK_SYSTEM.format(language=language.capitalize(), comment_style=comment_style),
-            f"Here is the code chunk to comment:\n\n{redact_secrets(code_chunk)}",
+            CHUNK_SYSTEM.format(
+                language=language.capitalize(),
+                comment_style=comment_style,
+                untrusted_context_rule=UNTRUSTED_CONTEXT_RULE,
+            ),
+            wrap_untrusted_context(f"Here is the code chunk to comment:\n\n{redact_secrets(code_chunk)}"),
         )
         if _metadata.get("provider") == "none":
             return code_chunk
@@ -50,8 +57,12 @@ def generate_file_summary(file_content: str, language: str, comment_style: str) 
     try:
         result, _metadata = model_router.invoke_text(
             "commenter_code_docs",
-            FILE_SYSTEM.format(language=language.capitalize(), comment_style=comment_style),
-            f"Here is the file content to summarize:\n\n{redact_secrets(file_content) or '// Empty module file'}",
+            FILE_SYSTEM.format(
+                language=language.capitalize(),
+                comment_style=comment_style,
+                untrusted_context_rule=UNTRUSTED_CONTEXT_RULE,
+            ),
+            wrap_untrusted_context(f"Here is the file content to summarize:\n\n{redact_secrets(file_content) or '// Empty module file'}"),
         )
         if _metadata.get("provider") == "none":
             return '"""\nFile summary unavailable because no model provider is configured.\n"""' if language == "python" else "/**\n * File summary unavailable because no model provider is configured.\n */"

@@ -6,6 +6,7 @@ from pathlib import Path
 from config import settings
 from providers import model_router
 from utils.storage import architecture_path, dependency_graph_path, ingestion_report_path
+from utils.prompt_security import UNTRUSTED_CONTEXT_RULE, wrap_untrusted_context
 
 
 ARCHITECTURE_SYSTEM = """You are an expert software architect. Generate a high-level Mermaid flowchart explaining what this project does and how its major components interact.
@@ -16,6 +17,7 @@ Rules:
 3. Use concise quoted labels.
 4. Show product/runtime concepts, not every file.
 5. Include frontend, backend, data stores, external services, and agent/RAG flows when present.
+6. {untrusted_context_rule}
 """
 
 
@@ -116,8 +118,8 @@ def architect_node(state: dict):
         try:
             raw, metadata = model_router.invoke_text(
                 "architecture_design",
-                ARCHITECTURE_SYSTEM,
-                "Project file/import summary:\n" + "\n".join(summary_lines),
+                ARCHITECTURE_SYSTEM.format(untrusted_context_rule=UNTRUSTED_CONTEXT_RULE),
+                wrap_untrusted_context("Project file/import summary:\n" + "\n".join(summary_lines)),
             )
             architecture = (
                 sanitize_mermaid(raw)

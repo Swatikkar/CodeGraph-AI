@@ -8,6 +8,7 @@ from providers import model_router
 from tools.file_ops import propose_patch, read_project_file
 from tools.retriever import retrieve_code_context
 from tools.web_search import trusted_web_search
+from utils.prompt_security import UNTRUSTED_CONTEXT_RULE, secure_repository_tool_messages
 
 
 DEBUGGER_SYSTEM_PROMPT_TEMPLATE = """You are the Debugger Agent for CodeGraph AI.
@@ -22,6 +23,7 @@ Protocol:
 5. Keep fixes scoped and cite the files you inspected.
 6. For runtime-error prompts, you must call retrieve_code_context before answering.
 7. When proposing a file change, you must call propose_patch instead of only writing a diff in text.
+8. {untrusted_context_rule}
 """
 
 
@@ -30,6 +32,13 @@ def _last_user_query(messages: list) -> str:
         if getattr(message, "type", None) == "human":
             return str(getattr(message, "content", ""))
     return ""
+
+
+def _current_turn_messages(messages: list) -> list:
+    for index in range(len(messages) - 1, -1, -1):
+        if getattr(messages[index], "type", None) == "human":
+            return messages[index:]
+    return messages
 
 
 def _tool_names(messages: list) -> set[str]:
@@ -90,8 +99,9 @@ def debugger_node(state: dict) -> dict:
     messages = state.get("messages", [])
     project_name = state.get("project_name", "")
     clean_messages = [m for m in messages if "ROUTE_TO_DEBUGGER" not in str(getattr(m, "content", ""))]
+    turn_messages = _current_turn_messages(clean_messages)
     tools = [retrieve_code_context, trusted_web_search, read_project_file, propose_patch]
-    tool_names = _tool_names(clean_messages)
+    tool_names = _tool_names(turn_messages)
     user_query = _last_user_query(clean_messages)
 
     if "retrieve_code_context" not in tool_names:
@@ -104,7 +114,7 @@ def debugger_node(state: dict) -> dict:
         }
 
     if "read_project_file" not in tool_names:
-        file_path = _first_context_file(clean_messages)
+        file_path = _first_context_file(turn_messages)
         if file_path:
             return {
                 "messages": [_tool_call("read_project_file", {"project_name": project_name, "file_path": file_path})],
@@ -112,10 +122,10 @@ def debugger_node(state: dict) -> dict:
             }
 
     if "propose_patch" not in tool_names:
-        for message in reversed(clean_messages):
+        for message in reversed(turn_messages):
             if getattr(message, "type", None) == "tool" and getattr(message, "name", "") == "read_project_file":
                 new_content = _safe_eta_patch(str(getattr(message, "content", "")))
-                file_path = _last_read_file_path(clean_messages)
+                file_path = _last_read_file_path(turn_messages)
                 if new_content and file_path:
                     return {
                         "messages": [_tool_call(
@@ -128,7 +138,10 @@ def debugger_node(state: dict) -> dict:
 
     response, metadata = model_router.invoke_chat(
         "debugger_coding",
-        [SystemMessage(content=DEBUGGER_SYSTEM_PROMPT_TEMPLATE.format(project_name=project_name))] + clean_messages,
+        [SystemMessage(content=DEBUGGER_SYSTEM_PROMPT_TEMPLATE.format(
+            project_name=project_name,
+            untrusted_context_rule=UNTRUSTED_CONTEXT_RULE,
+        ))] + secure_repository_tool_messages(clean_messages),
         tools=tools,
     )
 

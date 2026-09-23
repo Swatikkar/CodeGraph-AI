@@ -12,6 +12,7 @@ from utils.database import SessionLocal
 from utils.observability import log_event
 from utils.project_persistence import materialize_project_from_db, persist_project_snapshot, storage_enabled
 from utils.storage import project_root, read_status, write_status
+from utils.ai_runtime import ai_request_scope
 
 
 ACTIVE_JOB_STATES = {"queued", "running", "retryable"}
@@ -155,14 +156,15 @@ def execute_job(job_id: int) -> None:
     if not job or job.status != "running":
         db.close()
         return
-    user_id, project_slug = job.user_id, job.project_slug
+    user_id, project_slug, attempt_count = job.user_id, job.project_slug, job.attempt_count
     db.close()
 
     heartbeat_stop = threading.Event()
     heartbeat_thread = threading.Thread(target=_heartbeat, args=(job_id, heartbeat_stop), daemon=True)
     heartbeat_thread.start()
     try:
-        _run_pipeline(user_id, project_slug)
+        with ai_request_scope(f"ingestion-{job_id}-attempt-{attempt_count}", user_id, project_slug):
+            _run_pipeline(user_id, project_slug)
         db = SessionLocal()
         try:
             job = db.get(IngestionJobModel, job_id)

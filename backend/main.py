@@ -8,12 +8,13 @@ import shutil
 import subprocess
 import threading
 import time
+import uuid
 
 APP_IMPORT_STARTED_AT = time.perf_counter()
 
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import HumanMessage
@@ -76,6 +77,8 @@ from utils.ingestion_jobs import (
 )
 from utils.migrations import run_database_migrations
 from utils.rate_limit import rate_limit_middleware
+from utils.ai_runtime import AIBudgetExceeded, ai_request_scope
+from utils.runtime_metrics import prune_runtime_metrics, record_runtime_metric, summarize_runtime_metrics
 
 
 settings.configure_langsmith()
@@ -85,6 +88,13 @@ settings.create_required_directories()
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     run_database_migrations()
+    metrics_db = SessionLocal()
+    try:
+        pruned_metrics = prune_runtime_metrics(metrics_db)
+        if pruned_metrics:
+            log_event("runtime_metrics_pruned", count=pruned_metrics)
+    finally:
+        metrics_db.close()
     worker_stop = threading.Event()
     worker_thread = None
     if settings.ENVIRONMENT != "test":
@@ -549,8 +559,22 @@ async def get_chat_history(project_name: str, current_user=Depends(get_current_u
     return {"messages": messages}
 
 
+@app.get("/api/metrics/ai")
+async def get_ai_metrics(
+    days: int = 7,
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return summarize_runtime_metrics(db, current_user.id, days)
+
+
 @app.post("/api/chat")
-async def handle_chat_interaction(payload: ChatPayload, current_user=Depends(get_current_user), db: Session = Depends(get_db)):
+async def handle_chat_interaction(
+    payload: ChatPayload,
+    request: Request,
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     slug = slugify_project_name(payload.project_name)
     if storage_enabled():
         project = require_project(db, current_user.id, slug)
@@ -563,118 +587,151 @@ async def handle_chat_interaction(payload: ChatPayload, current_user=Depends(get
     if not allowed:
         raise HTTPException(status_code=400, detail=guardrail_error)
 
-    authenticated_thread_id = f"user_{current_user.id}_{payload.thread_id}"
+    authenticated_thread_id = f"user_{current_user.id}_{slug}_{payload.thread_id}"
     project_id = project_namespace(current_user.id, slug)
     config = {"configurable": {"thread_id": authenticated_thread_id}}
+    trace_id = getattr(request.state, "request_id", uuid.uuid4().hex)
     if storage_enabled() and not payload.is_approval:
         persist_chat_message(db, current_user.id, slug, "user", payload.query)
 
     def event_stream():
-        try:
-            if payload.is_approval:
-                if not payload.approval_file_path or payload.approval_new_content is None:
-                    yield sse_event("error", content="Approval requires file path and replacement content.")
-                else:
-                    result = write_project_file_after_approval(project_id, payload.approval_file_path, payload.approval_new_content)
-                    persist_project_snapshot(current_user.id, slug)
-                    yield sse_event("tool_result", tool="write_project_file_after_approval", content=result)
-                    yield sse_event("done")
-                return
+        sequence = 0
+        request_started = time.perf_counter()
 
-            input_data = {
-                "project_name": project_id,
-                "public_project_name": public_project_name,
-                "messages": [HumanMessage(content=payload.query)],
-                "provider_events": [],
-            }
-            accumulated = ""
-            for chunk, _metadata in chat_graph_app.stream(input_data, config=config, stream_mode="messages"):
-                if getattr(chunk, "tool_calls", None):
-                    graph_node = (_metadata or {}).get("langgraph_node", "")
-                    tool_owner = "Debugger" if "debugger" in graph_node else "Supervisor"
-                    for tool_call in chunk.tool_calls:
-                        tool_name = tool_call.get("name", "tool")
-                        tool_args = tool_call.get("args", {})
-                        if tool_name == "retrieve_code_context":
-                            print(f"[agent-tools] {tool_owner} called retrieve_code_context", flush=True)
-                        elif tool_name == "read_project_file":
-                            print(f"[agent-tools] {tool_owner} called read_project_file", flush=True)
-                        elif tool_name == "propose_patch":
-                            print(f"[agent-tools] {tool_owner} prepared patch proposal", flush=True)
-                            yield sse_event(
-                                "patch_preview",
-                                file_path=tool_args.get("file_path", ""),
-                                new_content=tool_args.get("new_content", ""),
-                                summary="Review the proposed file replacement before approving the write.",
-                            )
-                        else:
-                            print(f"[tool-call] start {tool_name} args={tool_args}", flush=True)
-                        yield sse_event("tool_start", tool=tool_name, args=tool_args)
-                    continue
+        def emit(event_type: str, **fields) -> str:
+            nonlocal sequence
+            sequence += 1
+            return sse_event(event_type, trace_id=trace_id, sequence=sequence, **fields)
 
-                if chunk.type == "tool":
-                    content = sanitize_user_facing_text(str(chunk.content), current_user.id, slug, public_project_name)
-                    print(f"[tool-call] result {getattr(chunk, 'name', 'tool')} chars={len(content)}", flush=True)
-                    for source in sorted(set(__import__("re").findall(r"File: ([^)\n,]+)", content))):
-                        yield sse_event("reference", path=source)
-                    if content.startswith("PATCH_PREVIEW_READY"):
-                        yield sse_event("approval_required", content="A code patch is ready for review before writing.")
+        with ai_request_scope(trace_id, current_user.id, slug) as ai_run:
+            try:
+                if payload.is_approval:
+                    if not payload.approval_file_path or payload.approval_new_content is None:
+                        yield emit("error", content="Approval requires file path and replacement content.")
                     else:
-                        yield sse_event("tool_result", content=content[:2000])
-                    continue
+                        result = write_project_file_after_approval(project_id, payload.approval_file_path, payload.approval_new_content)
+                        persist_project_snapshot(current_user.id, slug)
+                        yield emit("tool_result", tool="write_project_file_after_approval", content=result)
+                        yield emit("done")
+                    return
 
-                if chunk.type == "ai" and chunk.content:
-                    content = sanitize_user_facing_text(normalize_ai_content(chunk.content), current_user.id, slug, public_project_name)
-                    if "ROUTE_TO_DEBUGGER" in content:
+                input_data = {
+                    "project_name": project_id,
+                    "public_project_name": public_project_name,
+                    "messages": [HumanMessage(content=payload.query)],
+                    "provider_events": [],
+                }
+                accumulated = ""
+                references: set[str] = set()
+                for chunk, _metadata in chat_graph_app.stream(input_data, config=config, stream_mode="messages"):
+                    if ai_run.remaining_seconds() <= 0:
+                        raise AIBudgetExceeded("AI request time budget was exhausted.")
+                    if getattr(chunk, "tool_calls", None):
+                        graph_node = (_metadata or {}).get("langgraph_node", "")
+                        tool_owner = "Debugger" if "debugger" in graph_node else "Supervisor"
+                        for tool_call in chunk.tool_calls:
+                            tool_name = tool_call.get("name", "tool")
+                            tool_args = tool_call.get("args", {})
+                            log_event("agent_tool_requested", trace_id=trace_id, owner=tool_owner, tool=tool_name)
+                            if tool_name == "propose_patch":
+                                yield emit(
+                                    "patch_preview",
+                                    file_path=tool_args.get("file_path", ""),
+                                    new_content=tool_args.get("new_content", ""),
+                                    summary="Review the proposed file replacement before approving the write.",
+                                )
+                            yield emit("tool_start", tool=tool_name, args=tool_args)
                         continue
-                    if re_search_tool_leak(content):
+
+                    if chunk.type == "tool":
+                        content = sanitize_user_facing_text(str(chunk.content), current_user.id, slug, public_project_name)
+                        tool_references = set(__import__("re").findall(r"File: ([^)\n,]+)", content))
+                        references.update(tool_references)
+                        for source in sorted(tool_references):
+                            yield emit("reference", path=source)
+                        if content.startswith("PATCH_PREVIEW_READY"):
+                            yield emit("approval_required", content="A code patch is ready for review before writing.")
+                        else:
+                            yield emit("tool_result", content=content[:2000])
                         continue
-                    accumulated += content
-                    yield sse_event("chunk", content=content)
 
-            state = chat_graph_app.get_state(config)
-            if storage_enabled() and accumulated.strip():
-                db_session = SessionLocal()
-                try:
-                    persist_chat_message(db_session, current_user.id, slug, "bot", accumulated)
-                finally:
-                    db_session.close()
-            if state and state.values and state.values.get("provider_events"):
-                for event in state.values["provider_events"]:
-                    if not isinstance(event, dict):
-                        continue
-                    provider = event.get("provider", "unknown")
-                    elapsed = event.get("elapsed_seconds")
-                    if elapsed is not None and provider != "none":
-                        yield sse_event("response_meta", elapsed_seconds=elapsed)
-            if state and state.values and "messages" in state.values:
-                for message in reversed(state.values["messages"]):
-                    if getattr(message, "type", None) == "ai" and getattr(message, "content", None):
-                        final_content = sanitize_user_facing_text(
-                            normalize_ai_content(message.content),
-                            current_user.id,
-                            slug,
-                            public_project_name,
-                        )
-                        if "ROUTE_TO_DEBUGGER" not in final_content and final_content not in accumulated:
-                            accumulated += final_content
-                            yield sse_event("chunk", content=final_content)
-                        break
+                    if chunk.type == "ai" and chunk.content:
+                        content = sanitize_user_facing_text(normalize_ai_content(chunk.content), current_user.id, slug, public_project_name)
+                        if "ROUTE_TO_DEBUGGER" in content or re_search_tool_leak(content):
+                            continue
+                        accumulated += content
+                        yield emit("chunk", content=content)
 
-            if accumulated:
-                import re
-                sources = set(re.findall(r"File: ([^)\n,]+)", accumulated))
-                sources.update(re.findall(r"`([^`]+\.(?:py|js|jsx|ts|tsx|java|md|toml|json))`", accumulated))
-                for source in sorted(sources):
-                    yield sse_event("reference", path=source)
-            if state.next:
-                yield sse_event("approval_required", content="The debugger wants to use a protected tool. Review before approving.")
-            yield sse_event("done")
-        except Exception as exc:
-            log_event("chat_stream_failed", user_id=str(current_user.id), project_name=slug, error_type=type(exc).__name__)
-            yield sse_event("error", content="The chat request could not be completed. Please try again.")
+                state = chat_graph_app.get_state(config)
+                if storage_enabled() and accumulated.strip():
+                    db_session = SessionLocal()
+                    try:
+                        persist_chat_message(db_session, current_user.id, slug, "bot", accumulated)
+                    finally:
+                        db_session.close()
+                if state and state.values and state.values.get("provider_events"):
+                    for event in state.values["provider_events"]:
+                        if not isinstance(event, dict):
+                            continue
+                        provider = event.get("provider", "unknown")
+                        elapsed = event.get("elapsed_seconds")
+                        if elapsed is not None and provider != "none":
+                            yield emit(
+                                "response_meta",
+                                elapsed_seconds=elapsed,
+                                input_tokens=event.get("input_tokens"),
+                                output_tokens=event.get("output_tokens"),
+                                prompt_id=event.get("prompt_id"),
+                                prompt_version=event.get("prompt_version"),
+                            )
+                if state and state.values and "messages" in state.values:
+                    for message in reversed(state.values["messages"]):
+                        if getattr(message, "type", None) == "ai" and getattr(message, "content", None):
+                            final_content = sanitize_user_facing_text(
+                                normalize_ai_content(message.content),
+                                current_user.id,
+                                slug,
+                                public_project_name,
+                            )
+                            if "ROUTE_TO_DEBUGGER" not in final_content and final_content not in accumulated:
+                                accumulated += final_content
+                                yield emit("chunk", content=final_content)
+                            break
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+                if accumulated:
+                    import re
+                    references.update(re.findall(r"File: ([^)\n,]+)", accumulated))
+                    references.update(re.findall(r"`([^`]+\.(?:py|js|jsx|ts|tsx|java|md|toml|json))`", accumulated))
+                    for source in sorted(references):
+                        yield emit("reference", path=source)
+                if state.next:
+                    yield emit("approval_required", content="The debugger wants to use a protected tool. Review before approving.")
+                record_runtime_metric(
+                    kind="answer",
+                    component="chat_graph",
+                    status="success",
+                    latency_ms=round((time.perf_counter() - request_started) * 1000),
+                    attributes={
+                        "reference_count": len(references),
+                        "tool_calls": ai_run.tool_calls,
+                        "provider_calls": ai_run.provider_calls,
+                        "has_answer": bool(accumulated.strip()),
+                    },
+                )
+                yield emit("done")
+            except Exception as exc:
+                record_runtime_metric(
+                    kind="answer",
+                    component="chat_graph",
+                    status="failed",
+                    latency_ms=round((time.perf_counter() - request_started) * 1000),
+                    error_type=type(exc).__name__,
+                    attributes={"tool_calls": ai_run.tool_calls, "provider_calls": ai_run.provider_calls},
+                )
+                log_event("chat_stream_failed", trace_id=trace_id, user_id=str(current_user.id), project_name=slug, error_type=type(exc).__name__)
+                yield emit("error", content="The chat request could not be completed. Please try again.")
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream", headers={"X-Trace-ID": trace_id})
 
 
 def re_search_tool_leak(content: str) -> bool:
@@ -685,6 +742,7 @@ def re_search_tool_leak(content: str) -> bool:
 
 @app.post("/api/vision/analyze")
 async def analyze_error_screenshot(
+    request: Request,
     project_name: str = Form(...),
     prompt: str = Form("Analyze this error screenshot and suggest the likely cause."),
     file: UploadFile = File(...),
@@ -694,28 +752,36 @@ async def analyze_error_screenshot(
     if len(prompt) > settings.MAX_CHAT_QUERY_CHARS:
         raise HTTPException(status_code=413, detail="Prompt is too large.")
     slug = slugify_project_name(project_name)
-    print(f"[vision] Vision analysis requested for screenshot in project '{slug}'", flush=True)
+    trace_id = getattr(request.state, "request_id", uuid.uuid4().hex)
+    log_event("vision_analysis_started", trace_id=trace_id, user_id=str(current_user.id), project_name=slug)
     data = await file.read()
     image_b64 = base64.b64encode(data).decode("utf-8")
-    future = _vision_executor.submit(model_router.analyze_image, image_b64, file.content_type or "image/png", prompt)
+
+    def run_analysis():
+        with ai_request_scope(trace_id, current_user.id, slug):
+            return model_router.analyze_image(image_b64, file.content_type or "image/png", prompt)
+
+    future = _vision_executor.submit(run_analysis)
     try:
         timeout_seconds = max(5.0, settings.VISION_ANALYSIS_TIMEOUT_SECONDS)
         if settings.is_production:
             timeout_seconds = min(timeout_seconds, 35.0)
         result, metadata = future.result(timeout=timeout_seconds)
     except FutureTimeoutError:
+        future.cancel()
         result = (
             "Vision analysis timed out before the provider returned a response. "
             "Please paste the visible error text into chat so the debugger can continue with code retrieval."
         )
         metadata = {"provider": "none", "model": "timeout"}
     except Exception as exc:
+        log_event("vision_analysis_failed", trace_id=trace_id, error_type=type(exc).__name__)
         result = (
             "Vision analysis failed before a provider response was available. "
-            f"Please paste the visible error text into chat. Error: {str(exc)[:200]}"
+            "Please paste the visible error text into chat."
         )
         metadata = {"provider": "none", "model": "error"}
-    return {"analysis": result, "provider": metadata}
+    return {"analysis": result, "provider": metadata, "trace_id": trace_id}
 
 
 if __name__ == "__main__":

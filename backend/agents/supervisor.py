@@ -6,6 +6,7 @@ from providers import model_router
 from tools.file_ops import get_project_tree
 from tools.retriever import retrieve_code_context
 from tools.web_search import trusted_web_search
+from utils.prompt_security import UNTRUSTED_CONTEXT_RULE, secure_repository_tool_messages, wrap_untrusted_context
 
 
 SUPERVISOR_SYSTEM_PROMPT_TEMPLATE = """You are a codebase analyst inside the user's selected project workspace.
@@ -32,6 +33,7 @@ Privacy:
 - Do not introduce yourself as the platform unless the user explicitly asks who you are.
 - Never access projects outside the internal project handle.
 - Use at most one trusted_web_search call per answer.
+- {untrusted_context_rule}
 """
 
 
@@ -66,6 +68,13 @@ def _is_overview_prompt(prompt: str) -> bool:
     return any(marker in normalized for marker in OVERVIEW_MARKERS)
 
 
+def _current_turn_messages(messages: list) -> list:
+    for index in range(len(messages) - 1, -1, -1):
+        if getattr(messages[index], "type", None) == "human":
+            return messages[index:]
+    return messages
+
+
 def _ensure_file_references(response: AIMessage, context: str) -> AIMessage:
     file_paths = list(dict.fromkeys(re.findall(r"File: ([^,\n)]+)", context)))[:5]
     content = str(response.content or "")
@@ -83,6 +92,7 @@ def supervisor_node(state: dict) -> dict:
     system_prompt = SUPERVISOR_SYSTEM_PROMPT_TEMPLATE.format(
         project_name=project_name,
         public_project_name=public_project_name,
+        untrusted_context_rule=UNTRUSTED_CONTEXT_RULE,
     )
     tools = [retrieve_code_context, get_project_tree, trusted_web_search]
     last_human = next((m for m in reversed(messages) if getattr(m, "type", None) == "human"), None)
@@ -111,7 +121,6 @@ def supervisor_node(state: dict) -> dict:
         or prompt.strip() in {"hello", "hi", "hey"}
     )
     if last_human and not is_direct_prompt and any(marker in prompt for marker in debugger_markers):
-        print("[agent-router] Supervisor routed query to Debugger Agent", flush=True)
         return {"messages": [AIMessage(content="ROUTE_TO_DEBUGGER")], "provider_events": []}
 
     if should_use_retrieval and not should_use_search and not is_overview_prompt and not is_direct_prompt:
@@ -124,7 +133,7 @@ def supervisor_node(state: dict) -> dict:
             "supervisor_reasoning",
             [
                 SystemMessage(content=system_prompt + "\nUse the provided context and cite relevant file paths."),
-                HumanMessage(content=f"User question:\n{last_human.content}\n\nRetrieved context:\n{context}"),
+                HumanMessage(content=f"User question:\n{last_human.content}\n\n{wrap_untrusted_context(context)}"),
             ],
         )
         return {
@@ -142,6 +151,9 @@ def supervisor_node(state: dict) -> dict:
             "project_name": project_name,
             "top_n": 10,
         })
+        overview_context = wrap_untrusted_context(
+            f"Project tree:\n{tree}\n\nRetrieved context:\n{context}"
+        )
         response, metadata = model_router.invoke_chat(
             "supervisor_reasoning",
             [
@@ -155,8 +167,7 @@ def supervisor_node(state: dict) -> dict:
                 HumanMessage(
                     content=(
                         f"User question:\n{last_human.content}\n\n"
-                        f"Project tree:\n{tree}\n\n"
-                        f"Retrieved project context:\n{context}"
+                        f"{overview_context}"
                     )
                 ),
             ],
@@ -164,7 +175,10 @@ def supervisor_node(state: dict) -> dict:
         return {"messages": [_ensure_file_references(response, context)], "provider_events": [metadata]}
 
     should_use_tools = (should_use_retrieval or should_use_search) and not is_direct_prompt
-    has_tool_results = any(getattr(message, "type", None) == "tool" for message in messages)
+    has_tool_results = any(
+        getattr(message, "type", None) == "tool"
+        for message in _current_turn_messages(messages)
+    )
 
     response, metadata = model_router.invoke_chat(
         "supervisor_reasoning",
@@ -175,7 +189,7 @@ def supervisor_node(state: dict) -> dict:
                     + ("\nTool results are already available. Answer now without calling another tool." if has_tool_results else "")
                 )
             )
-        ] + messages,
+        ] + secure_repository_tool_messages(messages),
         tools=tools if should_use_tools and not has_tool_results else None,
     )
 
@@ -208,7 +222,7 @@ def supervisor_node(state: dict) -> dict:
                 "supervisor_reasoning",
                 [
                     SystemMessage(content=system_prompt + "\nUse the provided retrieved context. Do not ask for namespace."),
-                    HumanMessage(content=f"User question:\n{last_human.content}\n\nRetrieved context:\n{context}"),
+                    HumanMessage(content=f"User question:\n{last_human.content}\n\n{wrap_untrusted_context(context)}"),
                 ],
             )
 

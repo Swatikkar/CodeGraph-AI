@@ -156,6 +156,15 @@ class Settings(BaseSettings):
     RETRIEVAL_LEXICAL_CANDIDATES: int = 20
     RETRIEVAL_MAX_INDEX_DOCUMENTS: int = 2_000
 
+    AI_MAX_PROVIDER_CALLS: int = 4
+    AI_MAX_TOTAL_INPUT_TOKENS: int = 60_000
+    AI_MAX_OUTPUT_TOKENS: int = 4_096
+    AI_MAX_REQUEST_SECONDS: float = 75.0
+    AGENT_MAX_TOOL_CALLS: int = 4
+    AGENT_MAX_DUPLICATE_TOOL_CALLS: int = 1
+    AI_METRICS_RETENTION_DAYS: int = 30
+    AI_PROVIDER_PRICING_JSON: str = "{}"
+
     model_config = SettingsConfigDict(env_file=BASE_DIR / ".env", env_file_encoding="utf-8", extra="ignore")
 
     @property

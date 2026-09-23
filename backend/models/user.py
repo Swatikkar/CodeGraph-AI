@@ -125,3 +125,30 @@ class IngestionJobModel(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
     project = relationship("ProjectModel", back_populates="ingestion_job")
+
+
+class RuntimeMetricModel(Base):
+    __tablename__ = "runtime_metrics"
+    __table_args__ = (
+        Index("ix_runtime_metrics_user_created", "user_id", "created_at"),
+        Index("ix_runtime_metrics_trace", "trace_id"),
+        Index("ix_runtime_metrics_kind_status", "kind", "status"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    trace_id = Column(String, nullable=False)
+    user_id = Column(String, nullable=False)
+    project_slug = Column(String, nullable=True)
+    kind = Column(String, nullable=False)
+    component = Column(String, nullable=False)
+    status = Column(String, nullable=False)
+    prompt_id = Column(String, nullable=True)
+    prompt_version = Column(String, nullable=True)
+    latency_ms = Column(Integer, nullable=True)
+    input_tokens = Column(Integer, nullable=True)
+    output_tokens = Column(Integer, nullable=True)
+    token_source = Column(String, nullable=True)
+    estimated_cost_microusd = Column(Integer, nullable=True)
+    error_type = Column(String, nullable=True)
+    attributes_json = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)

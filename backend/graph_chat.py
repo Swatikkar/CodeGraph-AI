@@ -5,6 +5,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
+from langchain_core.messages import AIMessage
 from typing_extensions import NotRequired, TypedDict
 
 from agents.debugger import debugger_node
@@ -13,6 +14,8 @@ from config import settings
 from tools.file_ops import get_project_tree, propose_patch, read_project_file
 from tools.retriever import retrieve_code_context
 from tools.web_search import trusted_web_search
+from utils.ai_runtime import AIBudgetExceeded, current_ai_run
+from utils.observability import log_event
 
 
 class ChatState(TypedDict):
@@ -51,20 +54,47 @@ _debugger_tools_node = ToolNode([retrieve_code_context, trusted_web_search, read
 
 
 def supervisor_tools_node(state: ChatState):
-    return _supervisor_tools_node.invoke(lock_project_tool_args(state))
+    return _invoke_bounded_tools(state, _supervisor_tools_node)
 
 
 def debugger_tools_node(state: ChatState):
-    return _debugger_tools_node.invoke(lock_project_tool_args(state))
+    return _invoke_bounded_tools(state, _debugger_tools_node)
+
+
+def _invoke_bounded_tools(state: ChatState, node: ToolNode):
+    locked_state = lock_project_tool_args(state)
+    messages = locked_state.get("messages", [])
+    tool_calls = list(getattr(messages[-1], "tool_calls", []) or []) if messages else []
+    context = current_ai_run()
+    try:
+        if context:
+            context.consume_tool_calls(tool_calls)
+    except AIBudgetExceeded as exc:
+        log_event(
+            "agent_budget_exhausted",
+            trace_id=context.trace_id if context else "unscoped",
+            error_type=type(exc).__name__,
+            tool_calls=context.tool_calls if context else 0,
+        )
+        return {"messages": [AIMessage(content="I stopped this investigation because its tool-call safety budget was reached.")]}
+    return node.invoke(locked_state)
+
+
+def _current_turn_messages(messages: list) -> list:
+    """Return only messages belonging to the latest user turn."""
+    for index in range(len(messages) - 1, -1, -1):
+        if getattr(messages[index], "type", None) == "human":
+            return messages[index:]
+    return messages
 
 
 def route_supervisor(state: ChatState) -> Literal["supervisor_tools", "debugger", "__end__"]:
     messages = state.get("messages", [])
     last_message = messages[-1]
     if getattr(last_message, "tool_calls", None):
-        tool_names = ", ".join(tool_call.get("name", "tool") for tool_call in getattr(last_message, "tool_calls", []))
-        print(f"[agent-router] Supervisor selected retrieval/tools: {tool_names}", flush=True)
-        tool_messages = [message for message in messages if getattr(message, "type", None) == "tool"]
+        # Persisted chat history must not consume the newest request's budget.
+        turn_messages = _current_turn_messages(messages)
+        tool_messages = [message for message in turn_messages if getattr(message, "type", None) == "tool"]
         if len(tool_messages) >= 2:
             return "__end__"
         trusted_search_count = sum(
@@ -82,7 +112,6 @@ def route_supervisor(state: ChatState) -> Literal["supervisor_tools", "debugger"
             return "__end__"
         return "supervisor_tools"
     if "ROUTE_TO_DEBUGGER" in str(last_message.content):
-        print("[agent-router] Supervisor routed query to Debugger Agent", flush=True)
         return "debugger"
     return "__end__"
 
@@ -91,8 +120,6 @@ def route_debugger(state: ChatState) -> Literal["debugger_tools", "__end__"]:
     messages = state.get("messages", [])
     last_message = messages[-1]
     if getattr(last_message, "tool_calls", None):
-        tool_names = ", ".join(tool_call.get("name", "tool") for tool_call in getattr(last_message, "tool_calls", []))
-        print(f"[agent-router] Debugger selected tools: {tool_names}", flush=True)
         return "debugger_tools"
     return "__end__"
 
