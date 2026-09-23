@@ -47,8 +47,9 @@ def record_runtime_metric(
     prompt_version: str | None = None,
     error_type: str | None = None,
     attributes: dict | None = None,
+    context=None,
 ) -> None:
-    context = current_ai_run()
+    context = context or current_ai_run()
     trace_id = context.trace_id if context else "unscoped"
     user_id = context.user_id if context else "system"
     project_slug = context.project_slug if context else None

@@ -412,6 +412,27 @@ class HealthEndpointTests(unittest.TestCase):
         fake_session.commit.assert_called_once()
         fake_session.close.assert_called_once()
 
+    def test_explicit_ai_context_survives_stream_context_switches(self):
+        with patch("utils.runtime_metrics.current_ai_run", return_value=None):
+            with ai_request_scope("stream-trace", "stream-user", "project") as run:
+                record_runtime_metric(
+                    kind="answer",
+                    component="chat_graph",
+                    status="success",
+                    attributes={"reference_count": 1},
+                    context=run,
+                )
+
+        db = SessionLocal()
+        try:
+            metric = db.query(RuntimeMetricModel).filter(RuntimeMetricModel.trace_id == "stream-trace").one()
+            self.assertEqual(metric.user_id, "stream-user")
+            self.assertEqual(metric.kind, "answer")
+        finally:
+            db.query(RuntimeMetricModel).filter(RuntimeMetricModel.trace_id == "stream-trace").delete()
+            db.commit()
+            db.close()
+
     def test_provider_metadata_records_prompt_tokens_and_trace_metric(self):
         response = AIMessage(content="answer", usage_metadata={"input_tokens": 12, "output_tokens": 4, "total_tokens": 16})
         llm = MagicMock()

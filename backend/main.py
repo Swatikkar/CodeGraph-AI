@@ -717,6 +717,7 @@ async def handle_chat_interaction(
                         "provider_calls": ai_run.provider_calls,
                         "has_answer": bool(accumulated.strip()),
                     },
+                    context=ai_run,
                 )
                 yield emit("done")
             except Exception as exc:
@@ -727,6 +728,7 @@ async def handle_chat_interaction(
                     latency_ms=round((time.perf_counter() - request_started) * 1000),
                     error_type=type(exc).__name__,
                     attributes={"tool_calls": ai_run.tool_calls, "provider_calls": ai_run.provider_calls},
+                    context=ai_run,
                 )
                 log_event("chat_stream_failed", trace_id=trace_id, user_id=str(current_user.id), project_name=slug, error_type=type(exc).__name__)
                 yield emit("error", content="The chat request could not be completed. Please try again.")
