@@ -117,19 +117,30 @@ def safe_extract_zip(zip_path: Path, destination: Path) -> dict[str, int]:
                 raise IngestionValidationError("Nested archives are not supported.")
 
         destination.mkdir(parents=True, exist_ok=True)
-        for member in members:
-            member_path = _normalized_member_path(member.filename)
-            target = (destination / Path(*member_path.parts)).resolve()
-            if not target.is_relative_to(destination):
-                raise IngestionValidationError("ZIP archive contains an unsafe file path.")
-            if member.is_dir():
-                target.mkdir(parents=True, exist_ok=True)
-                continue
-            target.parent.mkdir(parents=True, exist_ok=True)
-            with archive.open(member) as source, target.open("wb") as output:
-                shutil.copyfileobj(source, output, length=1024 * 1024)
+        actual_total = 0
+        try:
+            for member in members:
+                member_path = _normalized_member_path(member.filename)
+                target = (destination / Path(*member_path.parts)).resolve()
+                if not target.is_relative_to(destination):
+                    raise IngestionValidationError("ZIP archive contains an unsafe file path.")
+                if member.is_dir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                member_total = 0
+                with archive.open(member) as source, target.open("wb") as output:
+                    while chunk := source.read(1024 * 1024):
+                        member_total += len(chunk)
+                        actual_total += len(chunk)
+                        if member_total > member.file_size or actual_total > settings.MAX_ZIP_EXTRACTED_BYTES:
+                            raise IngestionValidationError("ZIP archive expanded beyond its validated size.")
+                        output.write(chunk)
+        except Exception:
+            shutil.rmtree(destination, ignore_errors=True)
+            raise
 
-    return {"file_count": file_count, "extracted_bytes": total_size}
+    return {"file_count": file_count, "extracted_bytes": actual_total}
 
 
 def validate_repository_tree(root: Path) -> dict[str, int]:

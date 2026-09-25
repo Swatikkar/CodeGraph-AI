@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -174,6 +175,59 @@ class Settings(BaseSettings):
     AI_PROVIDER_PRICING_JSON: str = "{}"
 
     model_config = SettingsConfigDict(env_file=BASE_DIR / ".env", env_file_encoding="utf-8", extra="ignore")
+
+    @model_validator(mode="after")
+    def validate_runtime_boundaries(self):
+        if self.ENVIRONMENT.lower() not in {"development", "test", "production"}:
+            raise ValueError("ENVIRONMENT must be development, test, or production.")
+        if self.STORAGE_MODE.lower() not in {"local", "supabase"}:
+            raise ValueError("STORAGE_MODE must be local or supabase.")
+        if self.AUTH_PROVIDER.lower() not in {"local", "supabase"}:
+            raise ValueError("AUTH_PROVIDER must be local or supabase.")
+
+        positive_values = {
+            "PROVIDER_TIMEOUT_SECONDS": self.PROVIDER_TIMEOUT_SECONDS,
+            "PROVIDER_BACKOFF_BASE_SECONDS": self.PROVIDER_BACKOFF_BASE_SECONDS,
+            "PROVIDER_MAX_RETRY_AFTER_SECONDS": self.PROVIDER_MAX_RETRY_AFTER_SECONDS,
+            "PROVIDER_CIRCUIT_FAILURES": self.PROVIDER_CIRCUIT_FAILURES,
+            "PROVIDER_CIRCUIT_COOLDOWN_SECONDS": self.PROVIDER_CIRCUIT_COOLDOWN_SECONDS,
+            "VISION_ANALYSIS_TIMEOUT_SECONDS": self.VISION_ANALYSIS_TIMEOUT_SECONDS,
+            "MAX_PROJECT_FILES": self.MAX_PROJECT_FILES,
+            "MAX_PROJECT_SOURCE_BYTES": self.MAX_PROJECT_SOURCE_BYTES,
+            "MAX_FILE_BYTES": self.MAX_FILE_BYTES,
+            "MAX_ZIP_BYTES": self.MAX_ZIP_BYTES,
+            "MAX_ZIP_EXTRACTED_BYTES": self.MAX_ZIP_EXTRACTED_BYTES,
+            "MAX_ZIP_FILES": self.MAX_ZIP_FILES,
+            "MAX_ARCHIVE_PATH_LENGTH": self.MAX_ARCHIVE_PATH_LENGTH,
+            "MAX_ARCHIVE_DEPTH": self.MAX_ARCHIVE_DEPTH,
+            "MAX_ZIP_COMPRESSION_RATIO": self.MAX_ZIP_COMPRESSION_RATIO,
+            "INGESTION_JOB_MAX_ATTEMPTS": self.INGESTION_JOB_MAX_ATTEMPTS,
+            "INGESTION_JOB_STALE_SECONDS": self.INGESTION_JOB_STALE_SECONDS,
+            "INGESTION_HEARTBEAT_SECONDS": self.INGESTION_HEARTBEAT_SECONDS,
+            "INGESTION_RETRY_BASE_SECONDS": self.INGESTION_RETRY_BASE_SECONDS,
+            "INGESTION_RETRY_MAX_SECONDS": self.INGESTION_RETRY_MAX_SECONDS,
+            "AI_MAX_PROVIDER_CALLS": self.AI_MAX_PROVIDER_CALLS,
+            "AI_MAX_TOTAL_INPUT_TOKENS": self.AI_MAX_TOTAL_INPUT_TOKENS,
+            "AI_MAX_OUTPUT_TOKENS": self.AI_MAX_OUTPUT_TOKENS,
+            "AI_MAX_REQUEST_SECONDS": self.AI_MAX_REQUEST_SECONDS,
+            "AGENT_MAX_TOOL_CALLS": self.AGENT_MAX_TOOL_CALLS,
+        }
+        invalid = [name for name, value in positive_values.items() if value <= 0]
+        if invalid:
+            raise ValueError(f"Settings must be positive: {', '.join(invalid)}")
+        if self.PROVIDER_MAX_RETRIES < 0 or self.PROVIDER_TRANSIENT_RETRIES < 0:
+            raise ValueError("Provider retry counts must be non-negative.")
+        if self.INGESTION_RETRY_MAX_SECONDS < self.INGESTION_RETRY_BASE_SECONDS:
+            raise ValueError("INGESTION_RETRY_MAX_SECONDS must be at least the base retry delay.")
+        if not 0 <= self.MODEL_TEMPERATURE <= 2:
+            raise ValueError("MODEL_TEMPERATURE must be between 0 and 2.")
+        if self.is_production and self.JWT_SECRET_KEY == "fallback_secret_key":
+            raise ValueError("Production requires a non-default JWT secret.")
+        if self.AUTH_PROVIDER.lower() == "supabase" and not self.SUPABASE_JWT_SECRET:
+            raise ValueError("Supabase authentication requires SUPABASE_JWT_SECRET.")
+        if self.STORAGE_MODE.lower() == "supabase" and not self.DATABASE_URL:
+            raise ValueError("Supabase storage requires DATABASE_URL.")
+        return self
 
     @property
     def is_production(self) -> bool:

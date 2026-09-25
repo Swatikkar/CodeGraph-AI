@@ -1,3 +1,4 @@
+import io
 import os
 import stat
 import tempfile
@@ -114,6 +115,23 @@ class ZipExtractionTests(unittest.TestCase):
                 safe_extract_zip(archive, self.case_root / "output")
         finally:
             settings.MAX_ZIP_EXTRACTED_BYTES = original_limit
+
+    def test_rejects_stream_that_exceeds_validated_member_size(self):
+        archive = self._archive([("app.py", "1")])
+        destination = self.case_root / "output"
+        original_open = zipfile.ZipFile.open
+
+        def deceptive_open(instance, member, *args, **kwargs):
+            if getattr(member, "filename", member) == "app.py":
+                return io.BytesIO(b"12345")
+            return original_open(instance, member, *args, **kwargs)
+
+        with (
+            patch.object(zipfile.ZipFile, "open", new=deceptive_open),
+            self.assertRaisesRegex(IngestionValidationError, "validated size"),
+        ):
+            safe_extract_zip(archive, destination)
+        self.assertFalse(destination.exists())
 
     def test_rejects_too_many_files(self):
         original_limit = settings.MAX_ZIP_FILES

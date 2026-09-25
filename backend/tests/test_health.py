@@ -1,11 +1,14 @@
+import asyncio
 import json
 import os
 import re
 import tempfile
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 
 TEST_ROOT = tempfile.TemporaryDirectory(prefix="codegraph-phase0-")
@@ -34,8 +37,15 @@ from agents.supervisor import supervisor_node
 from graph_chat import route_supervisor
 from providers.local_embeddings import LocalHashingEmbeddings
 from providers.router import ModelRoute, ModelRouter, classify_provider_error, provider_circuits, transient_retry_delay
-from config import settings
-from main import app, release_local_ingestion_slot, reserve_local_ingestion_slot
+from config import Settings, settings
+from main import (
+    analyze_error_screenshot,
+    app,
+    normalize_ai_content,
+    release_local_ingestion_slot,
+    reserve_local_ingestion_slot,
+    sanitize_user_facing_text,
+)
 from models.user import IngestionJobEventModel, IngestionJobModel, ProjectModel, RuntimeMetricModel, UserModel
 from utils.database import SessionLocal, build_engine_options, engine
 from utils.project_persistence import enforce_user_project_quota, project_status_payload, reserve_project_ingestion
@@ -128,6 +138,14 @@ class HealthEndpointTests(unittest.TestCase):
 
         self.assertIn("ai_runtime_limits_must_be_positive", errors)
         self.assertIn("ai_provider_pricing_must_be_a_json_object", errors)
+
+    def test_settings_reject_invalid_semantic_boundaries(self):
+        with self.assertRaises(ValueError):
+            Settings(PROVIDER_TIMEOUT_SECONDS=0)
+        with self.assertRaises(ValueError):
+            Settings(INGESTION_RETRY_BASE_SECONDS=30, INGESTION_RETRY_MAX_SECONDS=10)
+        with self.assertRaises(ValueError):
+            Settings(ENVIRONMENT="unexpected")
 
     def test_postgres_disables_client_side_prepared_statements(self):
         options = build_engine_options("postgresql+psycopg://user:password@pooler/db")
@@ -609,6 +627,47 @@ class HealthEndpointTests(unittest.TestCase):
         self.assertEqual(classify_provider_error(RuntimeError("429 quota exceeded")), "rate_limit")
         self.assertEqual(classify_provider_error(TimeoutError("request timed out")), "timeout")
         self.assertEqual(classify_provider_error(RuntimeError("invalid API key")), "authentication")
+
+    def test_ai_content_normalization_uses_structured_blocks_only(self):
+        blocks = [
+            {"type": "text", "text": "first "},
+            {"type": "output_text", "text": "second"},
+            {"type": "image", "url": "ignored"},
+        ]
+        self.assertEqual(normalize_ai_content(blocks), "first second")
+        self.assertEqual(normalize_ai_content({"content": blocks}), "first second")
+        representation = "[{'type': 'text', 'text': 'do not parse'}]"
+        self.assertEqual(normalize_ai_content(representation), representation)
+
+    def test_user_facing_sanitizer_replaces_only_internal_namespace(self):
+        text = "Use `user_42_demo-project` or 42_demo-project. Supervisor Agent remains descriptive."
+        sanitized = sanitize_user_facing_text(text, 42, "demo-project", "Demo Project")
+        self.assertEqual(
+            sanitized,
+            "Use `Demo Project` or Demo Project. Supervisor Agent remains descriptive.",
+        )
+
+    def test_vision_provider_work_does_not_block_event_loop(self):
+        request = SimpleNamespace(state=SimpleNamespace(request_id="vision-nonblocking"))
+        upload = SimpleNamespace(content_type="image/png", read=AsyncMock(return_value=b"image"))
+        user = SimpleNamespace(id="vision-user")
+
+        def slow_analysis(*_args, **_kwargs):
+            time.sleep(0.08)
+            return "analysis", {"provider": "test", "model": "test"}
+
+        async def exercise():
+            with (
+                patch("main.validate_image_upload", new=AsyncMock()),
+                patch("main.model_router.analyze_image", side_effect=slow_analysis),
+            ):
+                task = asyncio.create_task(analyze_error_screenshot(request, "project", "prompt", upload, user))
+                await asyncio.sleep(0.01)
+                self.assertFalse(task.done(), "Vision work blocked the event loop until completion.")
+                return await task
+
+        result = asyncio.run(exercise())
+        self.assertEqual(result["analysis"], "analysis")
 
     def test_provider_retries_transient_failure_then_succeeds(self):
         response = AIMessage(content="recovered")

@@ -1,6 +1,6 @@
-import ast
+import asyncio
 import base64
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 import json
 import os
@@ -163,46 +163,17 @@ def release_local_ingestion_slot(user_id: int | str, project_name: str) -> None:
         _active_ingestions.discard(key)
 
 
-def public_project_name_for_chat(db: Session, user_id: int | str, slug: str) -> str:
-    if not storage_enabled():
-        return slug
-    try:
-        project = require_project(db, user_id, slug)
-        return project.display_name or slug
-    except Exception:
-        return slug
-
-
 def sanitize_user_facing_text(text: str, user_id: int | str, slug: str, public_name: str | None = None) -> str:
     if not text:
         return text
     import re
 
     sanitized = str(text)
-    namespace = project_namespace(user_id, slug)
     display_name = public_name or slug
-    replacements = {
-        f"`user_{namespace}`": f"`{display_name}`",
-        f"`user-{namespace}`": f"`{display_name}`",
-        f"'user_{namespace}'": f"'{display_name}'",
-        f"'user-{namespace}'": f"'{display_name}'",
-        f'"user_{namespace}"': f'"{display_name}"',
-        f'"user-{namespace}"': f'"{display_name}"',
-        f"user_{namespace}": display_name,
-        f"user-{namespace}": display_name,
-        f"`{namespace}`": f"`{display_name}`",
-        f"'{namespace}'": f"'{display_name}'",
-        f'"{namespace}"': f'"{display_name}"',
-        namespace: display_name,
-        "Supervisor Agent": "codebase assistant",
-        "Debugger Agent": "debugging assistant",
-        "CodeGraph AI project": "project",
-    }
-    for old, new in replacements.items():
-        sanitized = sanitized.replace(old, new)
+    escaped_user = re.escape(str(user_id))
     escaped_slug = re.escape(slug)
-    sanitized = re.sub(rf"\buser[_-]?\d+[_-]{escaped_slug}\b", display_name, sanitized)
-    sanitized = re.sub(rf"\b\d+_{escaped_slug}\b", display_name, sanitized)
+    internal_namespace = rf"\b(?:user[_-]?)?{escaped_user}[_-]{escaped_slug}\b"
+    sanitized = re.sub(internal_namespace, lambda _match: display_name, sanitized, flags=re.IGNORECASE)
     return sanitized
 
 
@@ -211,18 +182,21 @@ def sse_event(event_type: str, **payload) -> str:
 
 
 def normalize_ai_content(raw_content) -> str:
-    if isinstance(raw_content, list):
-        return "".join(item.get("text", "") for item in raw_content if isinstance(item, dict))
-
-    text = str(raw_content)
-    if text.startswith("[{") and "'type': 'text'" in text and "'extras':" in text:
-        try:
-            parsed = ast.literal_eval(text)
-            if isinstance(parsed, list):
-                return "".join(item.get("text", "") for item in parsed if isinstance(item, dict))
-        except (SyntaxError, ValueError):
-            return ""
-    return text
+    if raw_content is None:
+        return ""
+    if isinstance(raw_content, str):
+        return raw_content
+    if isinstance(raw_content, (list, tuple)):
+        return "".join(normalize_ai_content(item) for item in raw_content)
+    if isinstance(raw_content, dict):
+        block_type = raw_content.get("type")
+        if block_type in {"text", "output_text"}:
+            return str(raw_content.get("text", ""))
+        if "content" in raw_content:
+            return normalize_ai_content(raw_content["content"])
+        return ""
+    text_value = getattr(raw_content, "text", None)
+    return str(text_value) if text_value is not None else ""
 
 
 @app.get("/api/health")
@@ -597,13 +571,14 @@ async def handle_chat_interaction(
     db: Session = Depends(get_db),
 ):
     slug = slugify_project_name(payload.project_name)
+    project = None
     if storage_enabled():
         project = require_project(db, current_user.id, slug)
         if project.status != "ready":
             raise HTTPException(status_code=409, detail="Project ingestion is not complete.")
         materialize_project_from_db(db, current_user.id, slug)
         ensure_retrieval_cache(db, current_user.id, slug)
-    public_project_name = public_project_name_for_chat(db, current_user.id, slug)
+    public_project_name = (project.display_name or slug) if project else slug
     allowed, guardrail_error = screen_user_prompt(payload.query)
     if not allowed:
         raise HTTPException(status_code=400, detail=guardrail_error)
@@ -833,13 +808,14 @@ async def analyze_error_screenshot(
         with ai_request_scope(trace_id, current_user.id, slug):
             return model_router.analyze_image(image_b64, file.content_type or "image/png", prompt)
 
-    future = _vision_executor.submit(run_analysis)
+    loop = asyncio.get_running_loop()
+    future = loop.run_in_executor(_vision_executor, run_analysis)
     try:
         timeout_seconds = max(5.0, settings.VISION_ANALYSIS_TIMEOUT_SECONDS)
         if settings.is_production:
             timeout_seconds = min(timeout_seconds, 35.0)
-        result, metadata = future.result(timeout=timeout_seconds)
-    except FutureTimeoutError:
+        result, metadata = await asyncio.wait_for(future, timeout=timeout_seconds)
+    except asyncio.TimeoutError:
         future.cancel()
         result = (
             "Vision analysis timed out before the provider returned a response. "
