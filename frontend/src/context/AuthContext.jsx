@@ -6,6 +6,7 @@ import {
   useCallback,
 } from "react";
 import axios from "axios";
+import { isSupabaseAuth, supabase } from "../lib/supabase";
 
 const AuthContext = createContext();
 
@@ -27,6 +28,9 @@ export const AuthProvider = ({ children }) => {
 
   // 3. Declare logout first
   const logout = useCallback(() => {
+    if (isSupabaseAuth && supabase) {
+      void supabase.auth.signOut();
+    }
     localStorage.removeItem("token");
     delete axios.defaults.headers.common["Authorization"];
     setToken(null);
@@ -83,12 +87,36 @@ export const AuthProvider = ({ children }) => {
   );
 
   useEffect(() => {
+    if (isSupabaseAuth && supabase) {
+      let active = true;
+      const restoreSession = async () => {
+        const { data } = await supabase.auth.getSession();
+        if (active && data.session?.access_token) {
+          await fetchUser(data.session.access_token);
+        } else if (active) {
+          setLoading(false);
+        }
+      };
+      void restoreSession();
+      const { data: listener } = supabase.auth.onAuthStateChange((event, session) => {
+        if (!active) return;
+        if (session?.access_token) {
+          void fetchUser(session.access_token);
+        } else if (event === "SIGNED_OUT") {
+          logout();
+        }
+      });
+      return () => {
+        active = false;
+        listener.subscription.unsubscribe();
+      };
+    }
+
     const savedToken = localStorage.getItem("token");
     if (savedToken) {
       Promise.resolve().then(() => fetchUser(savedToken));
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [fetchUser, logout]);
 
   return (
     <AuthContext.Provider value={{ token, user, login, logout, loading }}>

@@ -4,6 +4,7 @@ import axios from "axios";
 import { useAuth } from "../context/AuthContext";
 import { Eye, EyeOff, Network } from "lucide-react";
 import { formatApiError } from "../utils/apiError";
+import { isSupabaseAuth, requireSupabase } from "../lib/supabase";
 
 export default function Login() {
   const navigate = useNavigate();
@@ -25,21 +26,28 @@ export default function Login() {
     setLoading(true);
 
     try {
-      const params = new URLSearchParams();
-      params.append("username", email);
-      params.append("password", password);
+      if (isSupabaseAuth) {
+        const { data, error } = await requireSupabase().auth.signInWithPassword({
+          email,
+          password,
+        });
+        if (error) throw error;
+        if (!data.session) throw new Error("Supabase did not return an active session.");
+        login(data.session.access_token);
+      } else {
+        const params = new URLSearchParams();
+        params.append("username", email);
+        params.append("password", password);
 
-      // Use the environment variable here:
-      const response = await axios.post(
-        `${import.meta.env.VITE_API_URL}/auth/login`,
-        params,
-        {
-          headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        },
-      );
-
-      // Pass token to AuthContext to lock it into local storage
-      login(response.data.access_token);
+        const response = await axios.post(
+          `${import.meta.env.VITE_API_URL}/auth/login`,
+          params,
+          {
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          },
+        );
+        login(response.data.access_token);
+      }
 
       // Send them directly to their private workspace
       navigate("/dashboard");
