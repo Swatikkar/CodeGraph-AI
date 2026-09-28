@@ -1,9 +1,12 @@
 # utils/auth.py
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr, Field, field_validator
 import jwt
+from jwt import PyJWKClient
+from jwt.exceptions import PyJWKClientError
 import bcrypt  # <-- NEW: Using native bcrypt instead of passlib
 from sqlalchemy.orm import Session
 
@@ -17,6 +20,41 @@ from models.user import UserModel
 auth_router = APIRouter(prefix="/api/auth", tags=["Authentication"])
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/auth/login")
 DUMMY_PASSWORD_HASH = "$2b$12$s6Fa5Ej.V25qiExVU69cBePDkTowiSR1UnVUXcaTmeqGJOCEoCA/e"
+
+
+def _supabase_issuer() -> str:
+    if not settings.SUPABASE_URL:
+        raise RuntimeError("SUPABASE_URL is required for Supabase JWT verification.")
+    return f"{settings.SUPABASE_URL.rstrip('/')}/auth/v1"
+
+
+@lru_cache(maxsize=1)
+def _supabase_jwks_client() -> PyJWKClient:
+    return PyJWKClient(f"{_supabase_issuer()}/.well-known/jwks.json")
+
+
+def _decode_supabase_token(token: str) -> dict:
+    """Verify current asymmetric Supabase tokens and legacy HS256 tokens."""
+    algorithm = jwt.get_unverified_header(token).get("alg")
+    decode_options = {
+        "audience": "authenticated",
+        "issuer": _supabase_issuer(),
+    }
+
+    if algorithm in {"ES256", "RS256"}:
+        jwks_client = _supabase_jwks_client()
+        signing_key = jwks_client.get_signing_key_from_jwt(token)
+        return jwt.decode(token, signing_key.key, algorithms=[algorithm], **decode_options)
+
+    if algorithm == "HS256" and settings.SUPABASE_JWT_SECRET:
+        return jwt.decode(
+            token,
+            settings.SUPABASE_JWT_SECRET,
+            algorithms=["HS256"],
+            **decode_options,
+        )
+
+    raise jwt.InvalidAlgorithmError(f"Unsupported Supabase JWT algorithm: {algorithm}")
 
 
 def validate_password_strength(value: str) -> str:
@@ -62,17 +100,12 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
     
     if settings.AUTH_PROVIDER == "supabase":
         try:
-            payload = jwt.decode(
-                token, 
-                settings.SUPABASE_JWT_SECRET, 
-                algorithms=[settings.JWT_ALGORITHM],
-                audience="authenticated"
-            )
+            payload = _decode_supabase_token(token)
             class SupabaseUser:
                 id = payload.get("sub")
                 email = payload.get("email")
             return SupabaseUser()
-        except jwt.PyJWTError:
+        except (jwt.PyJWTError, PyJWKClientError, RuntimeError):
             raise credentials_exception
 
     try:
