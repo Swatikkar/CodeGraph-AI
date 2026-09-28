@@ -223,8 +223,8 @@ class Settings(BaseSettings):
             raise ValueError("MODEL_TEMPERATURE must be between 0 and 2.")
         if self.is_production and self.JWT_SECRET_KEY == "fallback_secret_key":
             raise ValueError("Production requires a non-default JWT secret.")
-        if self.AUTH_PROVIDER.lower() == "supabase" and not self.SUPABASE_JWT_SECRET:
-            raise ValueError("Supabase authentication requires SUPABASE_JWT_SECRET.")
+        if self.AUTH_PROVIDER.lower() == "supabase" and not self.SUPABASE_URL:
+            raise ValueError("Supabase authentication requires SUPABASE_URL.")
         if self.STORAGE_MODE.lower() == "supabase" and not self.DATABASE_URL:
             raise ValueError("Supabase storage requires DATABASE_URL.")
         return self
