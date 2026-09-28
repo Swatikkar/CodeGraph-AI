@@ -103,7 +103,11 @@ export const AuthProvider = ({ children }) => {
         if (session?.access_token) {
           void fetchUser(session.access_token);
         } else if (event === "SIGNED_OUT") {
-          logout();
+          localStorage.removeItem("token");
+          delete axios.defaults.headers.common["Authorization"];
+          setToken(null);
+          setUser(null);
+          setLoading(false);
         }
       });
       return () => {
