@@ -247,6 +247,50 @@ class HealthEndpointTests(unittest.TestCase):
         self.assertEqual(documented[0], "<!DOCTYPE html>")
         self.assertTrue(documented[1].startswith("<!-- "))
 
+    def test_commenter_documents_symbols_in_additional_logic_languages(self):
+        examples = {
+            "service.ts": (
+                "export class UserService {}\nexport const loadUser = async (id: string) => id;\n",
+                ["class:UserService:1", "function:loadUser:2"],
+            ),
+            "service.go": (
+                "type UserService struct {}\nfunc (service *UserService) LoadUser(id string) string { return id }\n",
+                ["class:UserService:1", "function:LoadUser:2"],
+            ),
+            "service.rs": (
+                "pub struct UserService {}\npub fn load_user(id: String) -> String { id }\n",
+                ["class:UserService:1", "function:load_user:2"],
+            ),
+        }
+        previous_setting = settings.ENABLE_LLM_CODE_COMMENTING
+        settings.ENABLE_LLM_CODE_COMMENTING = True
+        try:
+            for filename, (source, symbol_keys) in examples.items():
+                source_path = TEST_PATH / filename
+                source_path.write_text(source, encoding="utf-8")
+                response = json.dumps({
+                    "file_summary": "Provides user service behavior.",
+                    "symbols": {key: f"Documents {key.split(':')[1]}." for key in symbol_keys},
+                })
+                with patch(
+                    "agents.commenter.model_router.invoke_text",
+                    return_value=(response, {"provider": "groq", "model": "test-model"}),
+                ):
+                    commenter_node({
+                        "unprocessed_files": [str(source_path)],
+                        "processed_files": [],
+                        "comment_report": [],
+                    })
+
+                documented = source_path.read_text(encoding="utf-8")
+                self.assertIn("/** Provides user service behavior. */", documented)
+                for key in symbol_keys:
+                    self.assertIn(f"/** Documents {key.split(':')[1]}. */", documented)
+                for original_line in source.strip().splitlines():
+                    self.assertIn(original_line, documented)
+        finally:
+            settings.ENABLE_LLM_CODE_COMMENTING = previous_setting
+
     def test_local_embeddings_are_deterministic_and_fixed_width(self):
         embeddings = LocalHashingEmbeddings()
         first = embeddings.embed_query("def calculate_total(items): return sum(items)")
