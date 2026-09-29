@@ -399,7 +399,6 @@ export default function Workspace() {
     formData.append("file", imageFile);
     const response = await axios.post(`${import.meta.env.VITE_API_URL}/vision/analyze`, formData, {
       headers: {
-        Authorization: `Bearer ${localStorage.getItem("token")}`,
         "Content-Type": "multipart/form-data",
       },
     });
@@ -439,9 +438,9 @@ export default function Workspace() {
 
       const response = await fetch(`${import.meta.env.VITE_API_URL}/chat`, {
         method: "POST",
+        credentials: "include",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${localStorage.getItem("token")}`,
         },
         body: JSON.stringify({
           project_name: projectName,
@@ -523,9 +522,9 @@ export default function Workspace() {
     try {
       const response = await fetch(`${import.meta.env.VITE_API_URL}/chat`, {
         method: "POST",
+        credentials: "include",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${localStorage.getItem("token")}`,
         },
         body: JSON.stringify({
           project_name: projectName,

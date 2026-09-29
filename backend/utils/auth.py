@@ -1,60 +1,32 @@
-# utils/auth.py
+import asyncio
+import hmac
+import uuid
 from datetime import datetime, timedelta, timezone
-from functools import lru_cache
-from fastapi import APIRouter, Depends, HTTPException, status
+
+from argon2 import PasswordHasher
+from argon2.exceptions import InvalidHashError, VerifyMismatchError
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr, Field, field_validator
 import jwt
-from jwt import PyJWKClient
-from jwt.exceptions import PyJWKClientError
-import bcrypt  # <-- NEW: Using native bcrypt instead of passlib
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from config import settings
-from utils.database import get_db
 from models.user import UserModel
+from utils.database import get_db
 
-# ==========================================
-# SETUP
-# ==========================================
+
 auth_router = APIRouter(prefix="/api/auth", tags=["Authentication"])
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/auth/login")
-DUMMY_PASSWORD_HASH = "$2b$12$s6Fa5Ej.V25qiExVU69cBePDkTowiSR1UnVUXcaTmeqGJOCEoCA/e"
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/auth/login", auto_error=False)
+ACCESS_COOKIE_NAME = "codegraph_access"
+SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+TOKEN_ISSUER = "codegraph-ai"
+TOKEN_AUDIENCE = "codegraph-ai-web"
 
-
-def _supabase_issuer() -> str:
-    if not settings.SUPABASE_URL:
-        raise RuntimeError("SUPABASE_URL is required for Supabase JWT verification.")
-    return f"{settings.SUPABASE_URL.rstrip('/')}/auth/v1"
-
-
-@lru_cache(maxsize=1)
-def _supabase_jwks_client() -> PyJWKClient:
-    return PyJWKClient(f"{_supabase_issuer()}/.well-known/jwks.json")
-
-
-def _decode_supabase_token(token: str) -> dict:
-    """Verify current asymmetric Supabase tokens and legacy HS256 tokens."""
-    algorithm = jwt.get_unverified_header(token).get("alg")
-    decode_options = {
-        "audience": "authenticated",
-        "issuer": _supabase_issuer(),
-    }
-
-    if algorithm in {"ES256", "RS256"}:
-        jwks_client = _supabase_jwks_client()
-        signing_key = jwks_client.get_signing_key_from_jwt(token)
-        return jwt.decode(token, signing_key.key, algorithms=[algorithm], **decode_options)
-
-    if algorithm == "HS256" and settings.SUPABASE_JWT_SECRET:
-        return jwt.decode(
-            token,
-            settings.SUPABASE_JWT_SECRET,
-            algorithms=["HS256"],
-            **decode_options,
-        )
-
-    raise jwt.InvalidAlgorithmError(f"Unsupported Supabase JWT algorithm: {algorithm}")
+# OWASP's minimum Argon2id profile: 19 MiB memory, 2 iterations, 1 lane.
+password_hasher = PasswordHasher(time_cost=2, memory_cost=19 * 1024, parallelism=1)
+DUMMY_PASSWORD_HASH = password_hasher.hash("not-a-real-password")
 
 
 def validate_password_strength(value: str) -> str:
@@ -62,9 +34,82 @@ def validate_password_strength(value: str) -> str:
         raise ValueError("Password must include uppercase, lowercase, and numeric characters.")
     return value
 
-# ==========================================
-# SCHEMAS
-# ==========================================
+
+def normalize_email(value: str) -> str:
+    return value.strip().lower()
+
+
+def hash_password(value: str) -> str:
+    return password_hasher.hash(value)
+
+
+def verify_password(value: str, encoded_hash: str) -> bool:
+    try:
+        return password_hasher.verify(encoded_hash, value)
+    except (VerifyMismatchError, InvalidHashError):
+        return False
+
+
+def create_access_token(user: UserModel) -> str:
+    now = datetime.now(timezone.utc)
+    return jwt.encode(
+        {
+            "sub": str(user.id),
+            "email": user.email,
+            "ver": user.token_version,
+            "type": "access",
+            "jti": uuid.uuid4().hex,
+            "iss": TOKEN_ISSUER,
+            "aud": TOKEN_AUDIENCE,
+            "iat": now,
+            "exp": now + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
+        },
+        settings.JWT_SECRET_KEY,
+        algorithm=settings.JWT_ALGORITHM,
+    )
+
+
+def set_access_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        key=ACCESS_COOKIE_NAME,
+        value=token,
+        max_age=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        httponly=True,
+        secure=settings.is_production,
+        samesite="none" if settings.is_production else "lax",
+        path="/",
+    )
+
+
+def clear_access_cookie(response: Response) -> None:
+    response.delete_cookie(
+        key=ACCESS_COOKIE_NAME,
+        httponly=True,
+        secure=settings.is_production,
+        samesite="none" if settings.is_production else "lax",
+        path="/",
+    )
+
+
+def require_allowed_cookie_origin(request: Request) -> None:
+    if request.method in SAFE_METHODS or request.headers.get("authorization"):
+        return
+    origin = request.headers.get("origin")
+    if not origin or not any(hmac.compare_digest(origin, allowed) for allowed in settings.cors_origins):
+        raise HTTPException(status_code=403, detail="Request origin is not allowed.")
+
+
+def reject_cross_site_browser_request(request: Request) -> None:
+    """Reject foreign browser form posts while preserving non-browser API clients."""
+    origin = request.headers.get("origin")
+    if origin:
+        if not any(hmac.compare_digest(origin, allowed) for allowed in settings.cors_origins):
+            raise HTTPException(status_code=403, detail="Request origin is not allowed.")
+        return
+    if request.headers.get("sec-fetch-site") == "cross-site":
+        raise HTTPException(status_code=403, detail="Cross-site request is not allowed.")
+
+
 class UserSignUp(BaseModel):
     email: EmailStr
     password: str = Field(min_length=8, max_length=128)
@@ -74,9 +119,9 @@ class UserSignUp(BaseModel):
     def strong_password(cls, value: str) -> str:
         return validate_password_strength(value)
 
-class Token(BaseModel):
-    access_token: str
-    token_type: str
+
+class AuthStatus(BaseModel):
+    message: str
 
 
 class PasswordChange(BaseModel):
@@ -88,113 +133,112 @@ class PasswordChange(BaseModel):
     def strong_new_password(cls, value: str) -> str:
         return validate_password_strength(value)
 
-# ==========================================
-# DEPENDENCY
-# ==========================================
-def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+
+def get_current_user(
+    request: Request,
+    bearer_token: str | None = Depends(oauth2_scheme),
+    db: Session = Depends(get_db),
+):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
-    
-    if settings.AUTH_PROVIDER == "supabase":
-        try:
-            payload = _decode_supabase_token(token)
-            class SupabaseUser:
-                id = payload.get("sub")
-                email = payload.get("email")
-            return SupabaseUser()
-        except (jwt.PyJWTError, PyJWKClientError, RuntimeError):
-            raise credentials_exception
+    token = bearer_token or request.cookies.get(ACCESS_COOKIE_NAME)
+    if not token:
+        raise credentials_exception
+    if not bearer_token:
+        require_allowed_cookie_origin(request)
 
     try:
-        payload = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
-        email: str = payload.get("sub")
+        payload = jwt.decode(
+            token,
+            settings.JWT_SECRET_KEY,
+            algorithms=[settings.JWT_ALGORITHM],
+            audience=TOKEN_AUDIENCE,
+            issuer=TOKEN_ISSUER,
+        )
+        user_id = int(payload.get("sub", ""))
         token_version = payload.get("ver")
-        if email is None:
+        if payload.get("type") != "access":
             raise credentials_exception
-    except jwt.PyJWTError:
+    except (jwt.PyJWTError, TypeError, ValueError):
         raise credentials_exception
-        
-    user = db.query(UserModel).filter(UserModel.email == email).first()
+
+    user = db.query(UserModel).filter(UserModel.id == user_id).first()
     if user is None or token_version != user.token_version:
         raise credentials_exception
     return user
 
-# ==========================================
-# ROUTES
-# ==========================================
-@auth_router.post("/signup", status_code=status.HTTP_201_CREATED)
+
+@auth_router.post("/signup", status_code=status.HTTP_201_CREATED, response_model=AuthStatus)
 async def signup(user_data: UserSignUp, db: Session = Depends(get_db)):
-    if settings.AUTH_PROVIDER == "supabase":
-        raise HTTPException(status_code=400, detail="Signup disabled. Use Supabase UI.")
-        
-    if db.query(UserModel).filter(UserModel.email == user_data.email).first():
-        raise HTTPException(status_code=400, detail="Email already registered")
-    
-    # <-- NEW: Hash password with pure bcrypt
-    salt = bcrypt.gensalt()
-    hashed_pass = bcrypt.hashpw(user_data.password.encode('utf-8'), salt).decode('utf-8')
-    
-    new_user = UserModel(email=user_data.email, hashed_password=hashed_pass)
-    db.add(new_user)
-    db.commit()
+    email = normalize_email(str(user_data.email))
+    hashed_password = await asyncio.to_thread(hash_password, user_data.password)
+    if db.query(UserModel).filter(UserModel.email == email).first():
+        raise HTTPException(status_code=400, detail="Unable to create account with these credentials.")
+
+    db.add(UserModel(email=email, hashed_password=hashed_password))
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="Unable to create account with these credentials.")
     return {"message": "User registered successfully"}
 
-@auth_router.post("/login", response_model=Token)
-async def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-    if settings.AUTH_PROVIDER == "supabase":
-        raise HTTPException(status_code=400, detail="Login disabled. Use Supabase UI.")
 
-    user = db.query(UserModel).filter(UserModel.email == form_data.username).first()
+@auth_router.post("/login", response_model=AuthStatus)
+async def login(
+    request: Request,
+    response: Response,
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: Session = Depends(get_db),
+):
+    reject_cross_site_browser_request(request)
+    email = normalize_email(form_data.username)
+    user = db.query(UserModel).filter(UserModel.email == email).first()
     password_hash = user.hashed_password if user else DUMMY_PASSWORD_HASH
-    password_valid = bcrypt.checkpw(form_data.password.encode('utf-8'), password_hash.encode('utf-8'))
+    password_valid = await asyncio.to_thread(verify_password, form_data.password, password_hash)
     if not user or not password_valid:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
-    expire = datetime.now(timezone.utc) + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-    to_encode = {"sub": user.email, "ver": user.token_version, "exp": expire}
-    access_token = jwt.encode(to_encode, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
-    
-    return {"access_token": access_token, "token_type": "bearer"}
+
+    set_access_cookie(response, create_access_token(user))
+    return {"message": "Authentication successful"}
+
 
 @auth_router.get("/me")
-async def get_me(current_user = Depends(get_current_user)):
+async def get_me(current_user=Depends(get_current_user)):
     return {"email": current_user.email, "id": current_user.id}
 
 
-@auth_router.post("/change-password")
+@auth_router.post("/logout", response_model=AuthStatus)
+async def logout(request: Request, response: Response):
+    reject_cross_site_browser_request(request)
+    clear_access_cookie(response)
+    return {"message": "Signed out successfully"}
+
+
+@auth_router.post("/change-password", response_model=AuthStatus)
 async def change_password(
     payload: PasswordChange,
+    response: Response,
     current_user=Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    if settings.AUTH_PROVIDER == "supabase":
-        raise HTTPException(status_code=400, detail="Password changes must be handled by Supabase auth.")
-
-    user = db.query(UserModel).filter(UserModel.id == current_user.id).first()
-    if not user or not bcrypt.checkpw(payload.current_password.encode("utf-8"), user.hashed_password.encode("utf-8")):
+    password_valid = await asyncio.to_thread(
+        verify_password,
+        payload.current_password,
+        current_user.hashed_password,
+    )
+    if not password_valid:
         raise HTTPException(status_code=400, detail="Current password is incorrect.")
 
-    salt = bcrypt.gensalt()
-    user.hashed_password = bcrypt.hashpw(payload.new_password.encode("utf-8"), salt).decode("utf-8")
-    user.token_version += 1
+    current_user.hashed_password = await asyncio.to_thread(hash_password, payload.new_password)
+    current_user.token_version += 1
     db.commit()
-    return {"message": "Password changed successfully. Sign in again on all devices."}
-
-
-@auth_router.post("/logout-all")
-async def logout_all(current_user=Depends(get_current_user), db: Session = Depends(get_db)):
-    if settings.AUTH_PROVIDER == "supabase":
-        raise HTTPException(status_code=400, detail="Session revocation must be handled by Supabase auth.")
-    user = db.query(UserModel).filter(UserModel.id == current_user.id).first()
-    if not user:
-        raise HTTPException(status_code=401, detail="Could not validate credentials")
-    user.token_version += 1
-    db.commit()
-    return {"message": "All sessions were revoked."}
+    clear_access_cookie(response)
+    return {"message": "Password changed successfully. Please sign in again."}

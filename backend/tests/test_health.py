@@ -64,7 +64,7 @@ from utils.ingestion_jobs import (
 from utils.job_control import IngestionCancelled, raise_if_cancelled
 from utils.ingestion_security import IngestionValidationError
 from utils.rate_limit import SlidingWindowLimiter
-from utils.auth import UserSignUp
+from utils.auth import ACCESS_COOKIE_NAME, UserSignUp, verify_password
 from utils.readiness import critical_config_errors
 from prompts import PROMPT_CATALOG
 from evals import score_ranking
@@ -546,7 +546,10 @@ class HealthEndpointTests(unittest.TestCase):
         self.client.post("/api/auth/signup", json={"email": email, "password": "StrongPass9"})
         login = self.client.post("/api/auth/login", data={"username": email, "password": "StrongPass9"})
         self.assertEqual(login.status_code, 200)
-        headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+        token = login.cookies.get(ACCESS_COOKIE_NAME)
+        self.assertIsNotNone(token)
+        self.assertIn("HttpOnly", login.headers["set-cookie"])
+        headers = {"Authorization": f"Bearer {token}"}
         self.assertEqual(self.client.get("/api/auth/me", headers=headers).status_code, 200)
 
         db = SessionLocal()
@@ -557,6 +560,58 @@ class HealthEndpointTests(unittest.TestCase):
         finally:
             db.close()
         self.assertEqual(self.client.get("/api/auth/me", headers=headers).status_code, 401)
+
+        db = SessionLocal()
+        try:
+            db.query(UserModel).filter(UserModel.email == email).delete()
+            db.commit()
+        finally:
+            db.close()
+
+    def test_backend_auth_uses_argon2_cookie_and_origin_protection(self):
+        email = "owned-auth@example.com"
+        signup = self.client.post("/api/auth/signup", json={"email": email.upper(), "password": "StrongPass9"})
+        self.assertEqual(signup.status_code, 201)
+
+        db = SessionLocal()
+        try:
+            user = db.query(UserModel).filter(UserModel.email == email).one()
+            self.assertTrue(user.hashed_password.startswith("$argon2id$"))
+            self.assertTrue(verify_password("StrongPass9", user.hashed_password))
+        finally:
+            db.close()
+
+        foreign_login = self.client.post(
+            "/api/auth/login",
+            data={"username": email, "password": "StrongPass9"},
+            headers={"Origin": "https://attacker.example"},
+        )
+        self.assertEqual(foreign_login.status_code, 403)
+
+        login = self.client.post("/api/auth/login", data={"username": email, "password": "StrongPass9"})
+        self.assertEqual(login.status_code, 200)
+        self.assertNotIn("access_token", login.json())
+        self.assertEqual(self.client.get("/api/auth/me").status_code, 200)
+
+        foreign_logout = self.client.post(
+            "/api/auth/logout",
+            headers={"Origin": "https://attacker.example"},
+        )
+        self.assertEqual(foreign_logout.status_code, 403)
+        self.assertEqual(self.client.get("/api/auth/me").status_code, 200)
+
+        rejected = self.client.post(
+            "/api/auth/change-password",
+            json={"current_password": "StrongPass9", "new_password": "NewStrongPass8"},
+        )
+        self.assertEqual(rejected.status_code, 403)
+        changed = self.client.post(
+            "/api/auth/change-password",
+            json={"current_password": "StrongPass9", "new_password": "NewStrongPass8"},
+            headers={"Origin": "http://localhost:5173"},
+        )
+        self.assertEqual(changed.status_code, 200)
+        self.assertEqual(self.client.get("/api/auth/me").status_code, 401)
 
         db = SessionLocal()
         try:

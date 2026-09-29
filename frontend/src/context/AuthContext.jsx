@@ -6,122 +6,51 @@ import {
   useCallback,
 } from "react";
 import axios from "axios";
-import { isSupabaseAuth, supabase } from "../lib/supabase";
-import { storeAuthToken } from "../utils/authToken";
 
 const AuthContext = createContext();
+axios.defaults.withCredentials = true;
 
 export const AuthProvider = ({ children }) => {
-  // 1. Initialize token safely
-  const [token, setToken] = useState(() => {
-    const savedToken = localStorage.getItem("token");
-    if (savedToken) {
-      storeAuthToken(savedToken);
-    }
-    return savedToken || null;
-  });
-
+  const [authenticated, setAuthenticated] = useState(false);
   const [user, setUser] = useState(null);
+  const [loading, setLoading] = useState(true);
 
-  // 2. SMARTER LOADING STATE: If there's no token, loading is instantly false.
-  // This completely removes the need to call setLoading(false) in our effect!
-  const [loading, setLoading] = useState(() => !!localStorage.getItem("token"));
-
-  // 3. Declare logout first
-  const logout = useCallback(() => {
-    if (isSupabaseAuth && supabase) {
-      void supabase.auth.signOut();
+  const fetchUser = useCallback(async () => {
+    try {
+      const response = await axios.get(`${import.meta.env.VITE_API_URL}/auth/me`);
+      setUser(response.data);
+      setAuthenticated(true);
+      return response.data;
+    } catch {
+      setUser(null);
+      setAuthenticated(false);
+      return null;
+    } finally {
+      setLoading(false);
     }
-    storeAuthToken(null);
-    setToken(null);
-    setUser(null);
-    setLoading(false);
   }, []);
 
-  // 4. Declare fetchUser BEFORE login so it exists in memory
-  // const fetchUser = useCallback(
-  //   async (activeToken) => {
-  //     try {
-  //       axios.defaults.headers.common["Authorization"] =
-  //         `Bearer ${activeToken}`;
-  //       const response = await axios.get("http://localhost:8000/api/auth/me");
-  //       setUser(response.data);
-  //     } catch (error) {
-  //       console.error("Token invalid or expired", error);
-  //       logout();
-  //     } finally {
-  //       setLoading(false);
-  //     }
-  //   },
-  //   [logout],
-  // );
-  const fetchUser = useCallback(
-    async (activeToken) => {
-      try {
-        storeAuthToken(activeToken);
-        setToken(activeToken);
-        // Use the environment variable here:
-        const response = await axios.get(
-          `${import.meta.env.VITE_API_URL}/auth/me`,
-        );
-        setUser(response.data);
-      } catch (error) {
-        console.error("Token invalid or expired", error);
-        logout();
-      } finally {
-        setLoading(false);
-      }
-    },
-    [logout],
-  );
+  const login = useCallback(async () => {
+    setLoading(true);
+    return fetchUser();
+  }, [fetchUser]);
 
-  // 5. Declare login last
-  const login = useCallback(
-    (newToken) => {
-      storeAuthToken(newToken);
-      setToken(newToken);
-      fetchUser(newToken);
-    },
-    [fetchUser],
-  );
+  const logout = useCallback(async () => {
+    try {
+      await axios.post(`${import.meta.env.VITE_API_URL}/auth/logout`);
+    } finally {
+      setAuthenticated(false);
+      setUser(null);
+      setLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
-    if (isSupabaseAuth && supabase) {
-      let active = true;
-      const restoreSession = async () => {
-        const { data } = await supabase.auth.getSession();
-        if (active && data.session?.access_token) {
-          await fetchUser(data.session.access_token);
-        } else if (active) {
-          setLoading(false);
-        }
-      };
-      void restoreSession();
-      const { data: listener } = supabase.auth.onAuthStateChange((event, session) => {
-        if (!active) return;
-        if (session?.access_token) {
-          void fetchUser(session.access_token);
-        } else if (event === "SIGNED_OUT") {
-          storeAuthToken(null);
-          setToken(null);
-          setUser(null);
-          setLoading(false);
-        }
-      });
-      return () => {
-        active = false;
-        listener.subscription.unsubscribe();
-      };
-    }
-
-    const savedToken = localStorage.getItem("token");
-    if (savedToken) {
-      Promise.resolve().then(() => fetchUser(savedToken));
-    }
-  }, [fetchUser, logout]);
+    Promise.resolve().then(() => fetchUser());
+  }, [fetchUser]);
 
   return (
-    <AuthContext.Provider value={{ token, user, login, logout, loading }}>
+    <AuthContext.Provider value={{ token: authenticated, user, login, logout, loading }}>
       {children}
     </AuthContext.Provider>
   );
