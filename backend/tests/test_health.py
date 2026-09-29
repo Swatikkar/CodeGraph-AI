@@ -42,6 +42,7 @@ from config import Settings, settings
 from main import (
     analyze_error_screenshot,
     app,
+    extract_answer_references,
     normalize_ai_content,
     release_local_ingestion_slot,
     reserve_local_ingestion_slot,
@@ -243,6 +244,14 @@ class HealthEndpointTests(unittest.TestCase):
         invoke_chat.assert_called_once()
         self.assertNotIn("tools", invoke_chat.call_args.kwargs)
         self.assertIn("`main.py`", result["messages"][0].content)
+
+    def test_answer_references_include_supported_frontend_files(self):
+        content = "See `src/index.html`, `styles/main.css`, and `components/App.vue`. Ignore `package.json`."
+
+        self.assertEqual(
+            extract_answer_references(content),
+            {"src/index.html", "styles/main.css", "components/App.vue"},
+        )
 
     def test_durable_reservation_rejects_processing_and_allows_terminal_retry(self):
         user_id = "duplicate-test-user"
