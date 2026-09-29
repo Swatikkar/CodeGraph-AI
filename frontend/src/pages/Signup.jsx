@@ -3,6 +3,7 @@ import { useNavigate, Link } from "react-router-dom";
 import axios from "axios";
 import { Eye, EyeOff, Network } from "lucide-react";
 import { formatApiError } from "../utils/apiError";
+import { API_URL } from "../config/api";
 
 export default function Signup() {
   const navigate = useNavigate();
@@ -16,7 +17,7 @@ export default function Signup() {
     setError("");
     setLoading(true);
     try {
-      await axios.post(`${import.meta.env.VITE_API_URL}/auth/signup`, formData);
+      await axios.post(`${API_URL}/auth/signup`, formData);
       navigate("/login", {
         state: {
           message: "Account created successfully! Please log in.",

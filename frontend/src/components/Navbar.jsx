@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import axios from "axios";
 import { useAuth } from "../context/AuthContext";
 import { KeyRound, LayoutDashboard, LogOut, Network, UserCircle } from "lucide-react";
+import { API_URL } from "../config/api";
 
 export default function Navbar() {
   const { token, logout, user } = useAuth();
@@ -34,7 +35,7 @@ export default function Navbar() {
     event.preventDefault();
     setPasswordStatus("");
     try {
-      await axios.post(`${import.meta.env.VITE_API_URL}/auth/change-password`, passwordForm);
+      await axios.post(`${API_URL}/auth/change-password`, passwordForm);
       setPasswordForm({ current_password: "", new_password: "" });
       await logout();
       navigate("/login", { state: { message: "Password changed successfully. Please log in again." } });
