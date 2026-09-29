@@ -16,6 +16,7 @@ import {
   X,
 } from "lucide-react";
 import { formatApiError } from "../utils/apiError";
+import { API_URL } from "../config/api";
 import { getAuthHeaders } from "../utils/authToken";
 
 const buildLineDiff = (oldText = "", newText = "") => {
@@ -155,7 +156,7 @@ const DiagramView = ({ projectName, mode }) => {
       setLoading(true);
       const endpoint = mode === "architecture" ? "architecture" : "dependency-graph";
       try {
-        const response = await axios.get(`${import.meta.env.VITE_API_URL}/${endpoint}/${projectName}`, getAuthHeaders());
+        const response = await axios.get(`${API_URL}/${endpoint}/${projectName}`, getAuthHeaders());
         const cleanCode = (response.data.mermaid_code || "")
           .replace(/-->\|([^|]+)\|>/g, "-->|$1|")
           .replace(/```mermaid/gi, "")
@@ -305,8 +306,8 @@ export default function Workspace() {
     const controller = new AbortController();
     async function init() {
       const [treeResponse, historyResponse] = await Promise.allSettled([
-        axios.get(`${import.meta.env.VITE_API_URL}/project-structure/${projectName}`, { ...getAuthHeaders(), signal: controller.signal }),
-        axios.get(`${import.meta.env.VITE_API_URL}/chat-history/${projectName}`, { ...getAuthHeaders(), signal: controller.signal }),
+        axios.get(`${API_URL}/project-structure/${projectName}`, { ...getAuthHeaders(), signal: controller.signal }),
+        axios.get(`${API_URL}/chat-history/${projectName}`, { ...getAuthHeaders(), signal: controller.signal }),
       ]);
       if (treeResponse.status === "fulfilled") {
         setTreeData(treeResponse.value.data.tree || []);
@@ -358,7 +359,7 @@ export default function Workspace() {
     setRightTab("file");
     setLoadingFile(true);
     try {
-      const response = await axios.get(`${import.meta.env.VITE_API_URL}/file-content`, {
+      const response = await axios.get(`${API_URL}/file-content`, {
         params: { path: filePath, project_name: projectName },
         ...getAuthHeaders(),
       });
@@ -372,7 +373,7 @@ export default function Workspace() {
 
   const fetchProjectFileContent = async (filePath) => {
     if (activeFile.path === filePath && activeFile.content) return activeFile.content;
-    const response = await axios.get(`${import.meta.env.VITE_API_URL}/file-content`, {
+    const response = await axios.get(`${API_URL}/file-content`, {
       params: { path: filePath, project_name: projectName },
       ...getAuthHeaders(),
     });
@@ -397,7 +398,7 @@ export default function Workspace() {
     formData.append("project_name", projectName);
     formData.append("prompt", chatInput || "Analyze this error screenshot for this project.");
     formData.append("file", imageFile);
-    const response = await axios.post(`${import.meta.env.VITE_API_URL}/vision/analyze`, formData, {
+    const response = await axios.post(`${API_URL}/vision/analyze`, formData, {
       headers: {
         "Content-Type": "multipart/form-data",
       },
@@ -436,7 +437,7 @@ export default function Workspace() {
         setImageFile(null);
       }
 
-      const response = await fetch(`${import.meta.env.VITE_API_URL}/chat`, {
+      const response = await fetch(`${API_URL}/chat`, {
         method: "POST",
         credentials: "include",
         headers: {
@@ -520,7 +521,7 @@ export default function Workspace() {
     setIsApprovingPatch(true);
     setPatchStatus("Applying approved patch...");
     try {
-      const response = await fetch(`${import.meta.env.VITE_API_URL}/chat`, {
+      const response = await fetch(`${API_URL}/chat`, {
         method: "POST",
         credentials: "include",
         headers: {

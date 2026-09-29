@@ -4,6 +4,7 @@ import axios from "axios";
 import { useAuth } from "../context/AuthContext";
 import { Eye, EyeOff, Network } from "lucide-react";
 import { formatApiError } from "../utils/apiError";
+import { API_URL } from "../config/api";
 
 export default function Login() {
   const navigate = useNavigate();
@@ -29,7 +30,7 @@ export default function Login() {
       params.append("username", email);
       params.append("password", password);
       await axios.post(
-        `${import.meta.env.VITE_API_URL}/auth/login`,
+        `${API_URL}/auth/login`,
         params,
         { headers: { "Content-Type": "application/x-www-form-urlencoded" } },
       );

@@ -6,6 +6,7 @@ import {
   useCallback,
 } from "react";
 import axios from "axios";
+import { API_URL } from "../config/api";
 
 const AuthContext = createContext();
 axios.defaults.withCredentials = true;
@@ -17,7 +18,7 @@ export const AuthProvider = ({ children }) => {
 
   const fetchUser = useCallback(async () => {
     try {
-      const response = await axios.get(`${import.meta.env.VITE_API_URL}/auth/me`);
+      const response = await axios.get(`${API_URL}/auth/me`);
       setUser(response.data);
       setAuthenticated(true);
       return response.data;
@@ -37,7 +38,7 @@ export const AuthProvider = ({ children }) => {
 
   const logout = useCallback(async () => {
     try {
-      await axios.post(`${import.meta.env.VITE_API_URL}/auth/logout`);
+      await axios.post(`${API_URL}/auth/logout`);
     } finally {
       setAuthenticated(false);
       setUser(null);

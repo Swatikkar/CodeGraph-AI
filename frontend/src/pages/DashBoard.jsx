@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import axios from "axios";
 import JSZip from "jszip";
 import { useAuth } from "../context/AuthContext";
+import { API_URL } from "../config/api";
 import {
   FolderGit2,
   Plus,
@@ -141,7 +142,7 @@ export default function Dashboard() {
   const fetchProjects = useCallback(async () => {
     try {
       const response = await axios.get(
-        `${import.meta.env.VITE_API_URL}/projects`,
+        `${API_URL}/projects`,
       );
       const fetched = response.data.projects || [];
       setProjects(fetched);
@@ -169,7 +170,7 @@ export default function Dashboard() {
     pollIntervalRef.current = setInterval(async () => {
       try {
         const response = await axios.get(
-          `${import.meta.env.VITE_API_URL}/projects`,
+          `${API_URL}/projects`,
         );
         const fetched = response.data.projects || [];
         setProjects(fetched);
@@ -211,7 +212,7 @@ export default function Dashboard() {
     }
     try {
       await axios.delete(
-        `${import.meta.env.VITE_API_URL}/projects/${targetProject}`,
+        `${API_URL}/projects/${targetProject}`,
       );
       setProjects((prev) => prev.filter((p) => p.name !== targetProject));
     } catch (err) {
@@ -226,7 +227,7 @@ export default function Dashboard() {
     setActiveJobAction(`${action}-${project.job_id}`);
     try {
       await axios.post(
-        `${import.meta.env.VITE_API_URL}/jobs/${project.job_id}/${action}`,
+        `${API_URL}/jobs/${project.job_id}/${action}`,
       );
       await fetchProjects();
       if (action === "retry") startPolling();
@@ -271,7 +272,7 @@ export default function Dashboard() {
 
     try {
       if (ingestMode === "github") {
-        await axios.post(`${import.meta.env.VITE_API_URL}/process-git`, {
+        await axios.post(`${API_URL}/process-git`, {
           repo_url: repoUrl.trim(),
           project_name: pendingProjectName,
         });
@@ -288,7 +289,7 @@ export default function Dashboard() {
         formData.append("file", uploadFile);
         formData.append("project_name", pendingProjectName);
         await axios.post(
-          `${import.meta.env.VITE_API_URL}/process-zip`,
+          `${API_URL}/process-zip`,
           formData,
           {
             headers: { "Content-Type": "multipart/form-data" },
