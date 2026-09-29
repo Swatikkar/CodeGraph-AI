@@ -16,10 +16,7 @@ import {
   X,
 } from "lucide-react";
 import { formatApiError } from "../utils/apiError";
-
-const getAuthHeaders = () => ({
-  headers: { Authorization: `Bearer ${localStorage.getItem("token")}` },
-});
+import { getAuthHeaders } from "../utils/authToken";
 
 const buildLineDiff = (oldText = "", newText = "") => {
   const oldLines = oldText.split("\n");
@@ -284,6 +281,7 @@ const DiagramView = ({ projectName, mode }) => {
 export default function Workspace() {
   const { projectName } = useParams();
   const [treeData, setTreeData] = useState([]);
+  const [treeError, setTreeError] = useState("");
   const [activeFile, setActiveFile] = useState({ path: "", name: "", content: "" });
   const [rightTab, setRightTab] = useState("file");
   const [references, setReferences] = useState([]);
@@ -310,7 +308,12 @@ export default function Workspace() {
         axios.get(`${import.meta.env.VITE_API_URL}/project-structure/${projectName}`, { ...getAuthHeaders(), signal: controller.signal }),
         axios.get(`${import.meta.env.VITE_API_URL}/chat-history/${projectName}`, { ...getAuthHeaders(), signal: controller.signal }),
       ]);
-      if (treeResponse.status === "fulfilled") setTreeData(treeResponse.value.data.tree || []);
+      if (treeResponse.status === "fulfilled") {
+        setTreeData(treeResponse.value.data.tree || []);
+        setTreeError("");
+      } else if (!controller.signal.aborted) {
+        setTreeError(formatApiError(treeResponse.reason, "Could not load project files."));
+      }
       if (historyResponse.status === "fulfilled" && historyResponse.value.data.messages?.length) {
         setChatMessages(historyResponse.value.data.messages);
       } else {
@@ -573,7 +576,9 @@ export default function Workspace() {
           </div>
         </div>
         <div className="flex-1 overflow-auto py-2">
-          {treeData.length ? treeData.map((node, idx) => (
+          {treeError ? (
+            <div className="p-4 text-sm text-red-300">{treeError}</div>
+          ) : treeData.length ? treeData.map((node, idx) => (
             <FileTreeItem key={`${node.path}-${idx}`} node={node} onFileSelect={handleFileSelect} activeFilePath={activeFile.path} />
           )) : (
             <div className="p-4 text-sm text-zinc-500">No files loaded.</div>

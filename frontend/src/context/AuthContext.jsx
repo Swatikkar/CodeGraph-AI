@@ -7,6 +7,7 @@ import {
 } from "react";
 import axios from "axios";
 import { isSupabaseAuth, supabase } from "../lib/supabase";
+import { storeAuthToken } from "../utils/authToken";
 
 const AuthContext = createContext();
 
@@ -15,7 +16,7 @@ export const AuthProvider = ({ children }) => {
   const [token, setToken] = useState(() => {
     const savedToken = localStorage.getItem("token");
     if (savedToken) {
-      axios.defaults.headers.common["Authorization"] = `Bearer ${savedToken}`;
+      storeAuthToken(savedToken);
     }
     return savedToken || null;
   });
@@ -31,8 +32,7 @@ export const AuthProvider = ({ children }) => {
     if (isSupabaseAuth && supabase) {
       void supabase.auth.signOut();
     }
-    localStorage.removeItem("token");
-    delete axios.defaults.headers.common["Authorization"];
+    storeAuthToken(null);
     setToken(null);
     setUser(null);
     setLoading(false);
@@ -58,8 +58,8 @@ export const AuthProvider = ({ children }) => {
   const fetchUser = useCallback(
     async (activeToken) => {
       try {
-        axios.defaults.headers.common["Authorization"] =
-          `Bearer ${activeToken}`;
+        storeAuthToken(activeToken);
+        setToken(activeToken);
         // Use the environment variable here:
         const response = await axios.get(
           `${import.meta.env.VITE_API_URL}/auth/me`,
@@ -78,8 +78,7 @@ export const AuthProvider = ({ children }) => {
   // 5. Declare login last
   const login = useCallback(
     (newToken) => {
-      localStorage.setItem("token", newToken);
-      axios.defaults.headers.common["Authorization"] = `Bearer ${newToken}`;
+      storeAuthToken(newToken);
       setToken(newToken);
       fetchUser(newToken);
     },
@@ -103,8 +102,7 @@ export const AuthProvider = ({ children }) => {
         if (session?.access_token) {
           void fetchUser(session.access_token);
         } else if (event === "SIGNED_OUT") {
-          localStorage.removeItem("token");
-          delete axios.defaults.headers.common["Authorization"];
+          storeAuthToken(null);
           setToken(null);
           setUser(null);
           setLoading(false);
