@@ -3,7 +3,6 @@ import { useNavigate, Link } from "react-router-dom";
 import axios from "axios";
 import { Eye, EyeOff, Network } from "lucide-react";
 import { formatApiError } from "../utils/apiError";
-import { isSupabaseAuth, requireSupabase } from "../lib/supabase";
 
 export default function Signup() {
   const navigate = useNavigate();
@@ -17,17 +16,10 @@ export default function Signup() {
     setError("");
     setLoading(true);
     try {
-      if (isSupabaseAuth) {
-        const { error } = await requireSupabase().auth.signUp(formData);
-        if (error) throw error;
-      } else {
-        await axios.post(`${import.meta.env.VITE_API_URL}/auth/signup`, formData);
-      }
+      await axios.post(`${import.meta.env.VITE_API_URL}/auth/signup`, formData);
       navigate("/login", {
         state: {
-          message: isSupabaseAuth
-            ? "Account created. Check your email if confirmation is required."
-            : "Account created successfully! Please log in.",
+          message: "Account created successfully! Please log in.",
         },
       });
     } catch (err) {

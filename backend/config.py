@@ -113,14 +113,9 @@ class Settings(BaseSettings):
     WEB_SEARCH_TIMEOUT_SECONDS: float = 8.0
     VISION_ANALYSIS_TIMEOUT_SECONDS: float = 35.0
 
-    AUTH_PROVIDER: str = "local"
     JWT_SECRET_KEY: str = "fallback_secret_key"
     JWT_ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
-    SUPABASE_URL: str | None = None
-    SUPABASE_ANON_KEY: str | None = None
-    SUPABASE_JWT_SECRET: str | None = None
-
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
     OPENROUTER_API_KEY: str | None = None
     GROQ_API_KEY: str | None = None
     GEMINI_API_KEY: str | None = None
@@ -186,8 +181,6 @@ class Settings(BaseSettings):
             raise ValueError("ENVIRONMENT must be development, test, or production.")
         if self.STORAGE_MODE.lower() not in {"local", "supabase"}:
             raise ValueError("STORAGE_MODE must be local or supabase.")
-        if self.AUTH_PROVIDER.lower() not in {"local", "supabase"}:
-            raise ValueError("AUTH_PROVIDER must be local or supabase.")
 
         positive_values = {
             "PROVIDER_TIMEOUT_SECONDS": self.PROVIDER_TIMEOUT_SECONDS,
@@ -196,6 +189,7 @@ class Settings(BaseSettings):
             "PROVIDER_CIRCUIT_FAILURES": self.PROVIDER_CIRCUIT_FAILURES,
             "PROVIDER_CIRCUIT_COOLDOWN_SECONDS": self.PROVIDER_CIRCUIT_COOLDOWN_SECONDS,
             "VISION_ANALYSIS_TIMEOUT_SECONDS": self.VISION_ANALYSIS_TIMEOUT_SECONDS,
+            "ACCESS_TOKEN_EXPIRE_MINUTES": self.ACCESS_TOKEN_EXPIRE_MINUTES,
             "MAX_PROJECT_FILES": self.MAX_PROJECT_FILES,
             "MAX_PROJECT_SOURCE_BYTES": self.MAX_PROJECT_SOURCE_BYTES,
             "MAX_FILE_BYTES": self.MAX_FILE_BYTES,
@@ -230,8 +224,6 @@ class Settings(BaseSettings):
             raise ValueError("MODEL_TEMPERATURE must be between 0 and 2.")
         if self.is_production and self.JWT_SECRET_KEY == "fallback_secret_key":
             raise ValueError("Production requires a non-default JWT secret.")
-        if self.AUTH_PROVIDER.lower() == "supabase" and not self.SUPABASE_URL:
-            raise ValueError("Supabase authentication requires SUPABASE_URL.")
         if self.STORAGE_MODE.lower() == "supabase" and not self.DATABASE_URL:
             raise ValueError("Supabase storage requires DATABASE_URL.")
         return self

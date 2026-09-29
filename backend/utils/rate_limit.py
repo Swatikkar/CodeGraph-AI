@@ -32,7 +32,7 @@ request_limiter = SlidingWindowLimiter()
 
 
 def _policy(path: str) -> tuple[int, int] | None:
-    if path in {"/api/auth/login", "/api/auth/signup", "/api/auth/change-password", "/api/auth/logout-all"}:
+    if path in {"/api/auth/login", "/api/auth/signup", "/api/auth/change-password", "/api/auth/logout"}:
         return settings.AUTH_RATE_LIMIT_ATTEMPTS, settings.AUTH_RATE_LIMIT_WINDOW_SECONDS
     if path == "/api/chat":
         return settings.CHAT_RATE_LIMIT_REQUESTS, settings.CHAT_RATE_LIMIT_WINDOW_SECONDS

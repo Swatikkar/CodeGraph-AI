@@ -13,8 +13,8 @@ export default function Navbar() {
   const [passwordForm, setPasswordForm] = useState({ current_password: "", new_password: "" });
   const [passwordStatus, setPasswordStatus] = useState("");
 
-  const handleLogout = () => {
-    logout();
+  const handleLogout = async () => {
+    await logout();
     navigate("/login");
   };
 
@@ -36,7 +36,8 @@ export default function Navbar() {
     try {
       await axios.post(`${import.meta.env.VITE_API_URL}/auth/change-password`, passwordForm);
       setPasswordForm({ current_password: "", new_password: "" });
-      setPasswordStatus("Password changed successfully.");
+      await logout();
+      navigate("/login", { state: { message: "Password changed successfully. Please log in again." } });
     } catch (error) {
       setPasswordStatus(error?.response?.data?.detail || "Unable to change password.");
     }
