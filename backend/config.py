@@ -20,15 +20,16 @@ IGNORE_FILENAMES = {
 SUPPORTED_SOURCE_EXTS = {
     ".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".go", ".rb", ".rs",
     ".c", ".h", ".cpp", ".hpp", ".cs", ".php", ".swift", ".kt", ".kts",
-    ".scala", ".sh", ".bash", ".sql",
+    ".scala", ".sh", ".bash", ".sql", ".html", ".htm", ".css", ".scss",
+    ".sass", ".vue", ".svelte",
 }
 
 SUPPORTED_SOURCE_FILENAMES = {"dockerfile", "makefile", "procfile"}
 
 IGNORE_EXTS = {
     ".pyc", ".png", ".jpg", ".jpeg", ".svg", ".ico", ".pdf", ".zip",
-    ".sqlite3", ".db", ".exe", ".bin", ".mp4", ".json", ".jsonc", ".css",
-    ".scss", ".sass", ".html", ".htm", ".xml", ".yaml", ".yml", ".toml",
+    ".sqlite3", ".db", ".exe", ".bin", ".mp4", ".json", ".jsonc",
+    ".xml", ".yaml", ".yml", ".toml",
     ".lock", ".csv", ".tsv", ".md", ".txt", ".rst", ".gitignore", ".env",
     ".local",
 }
