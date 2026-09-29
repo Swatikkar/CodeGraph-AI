@@ -95,11 +95,7 @@ def wrapped_commenter_node(state: GraphState):
     processed = len(state.get("processed_files", []))
     total = max(unprocessed + processed, 1)
     progress = 20 + int((processed / total) * 35)
-    stage_message = (
-        f"Commenting files ({processed}/{total})..."
-        if settings.ENABLE_LLM_CODE_COMMENTING
-        else f"Preparing source files ({processed}/{total})..."
-    )
+    stage_message = f"Documenting source files ({processed}/{total})..."
     write_status(
         state["user_id"],
         state["project_name"],
