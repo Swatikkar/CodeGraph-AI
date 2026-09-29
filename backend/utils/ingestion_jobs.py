@@ -265,7 +265,12 @@ def execute_job(job_id: int) -> None:
             job.error_message = str(exc)[:500]
             job.project.status = "retryable" if retryable else "error"
             job.project.stage = "worker"
-            job.project.message = "Ingestion will be retried." if retryable else "Ingestion failed."
+            if retryable:
+                job.project.message = "Ingestion will be retried."
+            elif isinstance(exc, IngestionValidationError):
+                job.project.message = str(exc)[:240]
+            else:
+                job.project.message = "Ingestion failed."
             job.project.error = job.error_code
             if retryable:
                 delay = min(settings.INGESTION_RETRY_MAX_SECONDS, settings.INGESTION_RETRY_BASE_SECONDS * (2 ** max(0, job.attempt_count - 1)))

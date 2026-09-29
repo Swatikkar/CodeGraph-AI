@@ -395,6 +395,7 @@ class HealthEndpointTests(unittest.TestCase):
             self.assertEqual(failed.project.status, "error")
             self.assertEqual(failed.attempt_count, 1)
             self.assertEqual(failed.error_code, "IngestionValidationError")
+            self.assertIn("No supported source files", failed.project.message)
         finally:
             db.delete(db.get(ProjectModel, project_id))
             db.commit()

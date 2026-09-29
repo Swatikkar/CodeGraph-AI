@@ -159,6 +159,20 @@ class ZipExtractionTests(unittest.TestCase):
 
 
 class ScannerBoundaryTests(unittest.TestCase):
+    def test_scanner_accepts_common_frontend_source_files(self):
+        project = TEST_PATH / "frontend-source-project"
+        project.mkdir(parents=True, exist_ok=True)
+        for filename in ("index.html", "styles.css", "theme.scss", "Widget.vue", "Panel.svelte"):
+            (project / filename).write_text("source", encoding="utf-8")
+
+        result = get_codebase_map(str(project), user_id="test", project_name="frontend-source")
+
+        self.assertEqual(result["total_files"], 5)
+        self.assertEqual(
+            {Path(path).suffix.lower() for path in result["files_to_process"]},
+            {".html", ".css", ".scss", ".vue", ".svelte"},
+        )
+
     def test_scanner_skips_secrets_and_stops_at_global_file_limit(self):
         project = TEST_PATH / "scanner-project"
         (project / "a").mkdir(parents=True, exist_ok=True)
