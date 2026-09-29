@@ -35,6 +35,7 @@ from agents.architect import architect_node
 from agents.debugger import debugger_node
 from agents.supervisor import supervisor_node
 from graph_chat import route_supervisor
+from graph import scanner_node
 from providers.local_embeddings import LocalHashingEmbeddings
 from providers.router import ModelRoute, ModelRouter, classify_provider_error, provider_circuits, transient_retry_delay
 from config import Settings, settings
@@ -60,6 +61,7 @@ from utils.ingestion_jobs import (
     summarize_job_operations,
 )
 from utils.job_control import IngestionCancelled, raise_if_cancelled
+from utils.ingestion_security import IngestionValidationError
 from utils.rate_limit import SlidingWindowLimiter
 from utils.auth import UserSignUp
 from utils.readiness import critical_config_errors
@@ -347,6 +349,52 @@ class HealthEndpointTests(unittest.TestCase):
             self.assertEqual(failed.status, "failed")
             self.assertEqual(failed.project.status, "error")
             self.assertEqual(failed.error_code, "RuntimeError")
+        finally:
+            db.delete(db.get(ProjectModel, project_id))
+            db.commit()
+            db.close()
+
+    def test_source_less_repository_fails_without_retries(self):
+        source_root = TEST_PATH / "source-less-project"
+        source_root.mkdir(exist_ok=True)
+        (source_root / "README").write_text("documentation only", encoding="utf-8")
+        with patch("graph.raise_if_cancelled"), patch("graph.write_status"):
+            result = scanner_node({
+                "job_id": 1,
+                "user_id": "validation-user",
+                "project_name": "source-less-project",
+                "project_path": str(source_root),
+                "unprocessed_files": [],
+                "processed_files": [],
+                "comment_report": [],
+                "scanned_files": 0,
+                "errors": [],
+            })
+
+        self.assertEqual(result["scanned_files"], 0)
+        self.assertIn("No supported source files", result["errors"][0])
+
+        db = SessionLocal()
+        project = reserve_project_ingestion(db, "validation-user", "empty-project", "Empty Project", "git")
+        job = enqueue_ingestion_job(db, project)
+        job_id = job.id
+        project_id = project.id
+        db.close()
+
+        self.assertEqual(claim_next_job(), job_id)
+        with patch(
+            "utils.ingestion_jobs._run_pipeline",
+            side_effect=IngestionValidationError("No supported source files were found."),
+        ), patch("utils.ingestion_jobs.write_status"):
+            execute_job(job_id)
+
+        db = SessionLocal()
+        try:
+            failed = db.get(IngestionJobModel, job_id)
+            self.assertEqual(failed.status, "failed")
+            self.assertEqual(failed.project.status, "error")
+            self.assertEqual(failed.attempt_count, 1)
+            self.assertEqual(failed.error_code, "IngestionValidationError")
         finally:
             db.delete(db.get(ProjectModel, project_id))
             db.commit()
