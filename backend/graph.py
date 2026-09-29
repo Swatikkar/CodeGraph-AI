@@ -67,6 +67,17 @@ def scanner_node(state: GraphState):
             scanned_file_paths=scan_result["files_to_process"],
             stage="scan",
         )
+        if scanned_files == 0:
+            return {
+                "unprocessed_files": [],
+                "processed_files": [],
+                "comment_report": [],
+                "scanned_files": 0,
+                "errors": [
+                    "No supported source files were found. Upload a project containing source code "
+                    "instead of only generated, hidden, or unsupported files."
+                ],
+            }
         return {
             "unprocessed_files": scan_result["files_to_process"],
             "processed_files": [],

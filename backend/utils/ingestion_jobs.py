@@ -15,6 +15,7 @@ from utils.project_persistence import materialize_project_from_db, persist_proje
 from utils.storage import project_root, read_status, write_status
 from utils.ai_runtime import ai_request_scope
 from utils.job_control import IngestionCancelled, raise_if_cancelled, validate_cancellable_status
+from utils.ingestion_security import IngestionValidationError
 
 
 ACTIVE_JOB_STATES = {"queued", "running", "retryable"}
@@ -180,6 +181,10 @@ def _run_pipeline(job_id: int, user_id: str, project_slug: str) -> None:
     recursion_limit = max(50, settings.MAX_PROJECT_FILES + 10)
     result = codegraph_app.invoke(state, config={"recursion_limit": recursion_limit})
     raise_if_cancelled(job_id)
+    if result.get("scanned_files", 0) == 0:
+        raise IngestionValidationError(
+            "No supported source files were found. Upload a project containing source code."
+        )
     if result.get("errors") or read_status(user_id, project_slug).get("status") == "error":
         raise RuntimeError("Pipeline reported an ingestion error.")
     persist_project_snapshot(user_id, project_slug)
@@ -248,7 +253,10 @@ def execute_job(job_id: int) -> None:
             job = db.get(IngestionJobModel, job_id)
             if not job:
                 raise RuntimeError("Ingestion job disappeared while handling a failure.") from exc
-            retryable = job.attempt_count < job.max_attempts
+            retryable = (
+                job.attempt_count < job.max_attempts
+                and not isinstance(exc, IngestionValidationError)
+            )
             previous_status = job.status
             job.status = "retryable" if retryable else "failed"
             job.heartbeat_at = utc_now()
