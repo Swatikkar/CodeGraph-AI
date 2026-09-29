@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from config import settings
+from config import SUPPORTED_SOURCE_EXTS, SUPPORTED_SOURCE_FILENAMES, settings
 from graph_chat import chat_graph_app, close_chat_storage
 from providers import model_router
 from tools.ingester import purge_project_from_chroma
@@ -179,6 +179,22 @@ def sanitize_user_facing_text(text: str, user_id: int | str, slug: str, public_n
 
 def sse_event(event_type: str, **payload) -> str:
     return f"data: {json.dumps({'type': event_type, **payload})}\n\n"
+
+
+def extract_answer_references(content: str) -> set[str]:
+    import re
+
+    references = {
+        match.strip()
+        for match in re.findall(r"File: ([^)\n,]+)", content or "")
+        if match.strip()
+    }
+    for candidate in re.findall(r"`([^`\n]+)`", content or ""):
+        cleaned = candidate.strip()
+        path = Path(cleaned)
+        if path.suffix.lower() in SUPPORTED_SOURCE_EXTS or path.name.lower() in SUPPORTED_SOURCE_FILENAMES:
+            references.add(cleaned)
+    return references
 
 
 def normalize_ai_content(raw_content) -> str:
@@ -658,7 +674,7 @@ async def handle_chat_interaction(
 
                     if chunk.type == "tool":
                         content = sanitize_user_facing_text(str(chunk.content), current_user.id, slug, public_project_name)
-                        tool_references = set(__import__("re").findall(r"File: ([^)\n,]+)", content))
+                        tool_references = extract_answer_references(content)
                         references.update(tool_references)
                         for source in sorted(tool_references):
                             yield emit("reference", path=source)
@@ -727,9 +743,7 @@ async def handle_chat_interaction(
                             break
 
                 if accumulated:
-                    import re
-                    references.update(re.findall(r"File: ([^)\n,]+)", accumulated))
-                    references.update(re.findall(r"`([^`]+\.(?:py|js|jsx|ts|tsx|java|md|toml|json))`", accumulated))
+                    references.update(extract_answer_references(accumulated))
                     for source in sorted(references):
                         yield emit("reference", path=source)
                 if state.next:
