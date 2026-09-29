@@ -23,6 +23,9 @@ class AIRunContext:
     trace_id: str
     user_id: str
     project_slug: str | None
+    max_provider_calls: int | None = None
+    max_input_tokens: int | None = None
+    max_seconds: float | None = None
     started_at: float = field(default_factory=time.perf_counter)
     provider_calls: int = 0
     input_tokens: int = 0
@@ -31,14 +34,14 @@ class AIRunContext:
     metrics: list[dict] = field(default_factory=list)
 
     def remaining_seconds(self) -> float:
-        return settings.AI_MAX_REQUEST_SECONDS - (time.perf_counter() - self.started_at)
+        return (self.max_seconds or settings.AI_MAX_REQUEST_SECONDS) - (time.perf_counter() - self.started_at)
 
     def consume_provider_call(self, input_tokens: int) -> None:
         if self.remaining_seconds() <= 0:
             raise AIBudgetExceeded("AI request time budget was exhausted.")
-        if self.provider_calls >= settings.AI_MAX_PROVIDER_CALLS:
+        if self.provider_calls >= (self.max_provider_calls or settings.AI_MAX_PROVIDER_CALLS):
             raise AIBudgetExceeded("AI provider-call budget was exhausted.")
-        if self.input_tokens + input_tokens > settings.AI_MAX_TOTAL_INPUT_TOKENS:
+        if self.input_tokens + input_tokens > (self.max_input_tokens or settings.AI_MAX_TOTAL_INPUT_TOKENS):
             raise AIBudgetExceeded("AI input-token budget was exhausted.")
         self.provider_calls += 1
         self.input_tokens += input_tokens
@@ -67,8 +70,23 @@ _current_ai_run: ContextVar[AIRunContext | None] = ContextVar("current_ai_run", 
 
 
 @contextmanager
-def ai_request_scope(trace_id: str, user_id: int | str, project_slug: str | None):
-    context = AIRunContext(trace_id=trace_id, user_id=str(user_id), project_slug=project_slug)
+def ai_request_scope(
+    trace_id: str,
+    user_id: int | str,
+    project_slug: str | None,
+    *,
+    max_provider_calls: int | None = None,
+    max_input_tokens: int | None = None,
+    max_seconds: float | None = None,
+):
+    context = AIRunContext(
+        trace_id=trace_id,
+        user_id=str(user_id),
+        project_slug=project_slug,
+        max_provider_calls=max_provider_calls,
+        max_input_tokens=max_input_tokens,
+        max_seconds=max_seconds,
+    )
     token = _current_ai_run.set(context)
     try:
         yield context

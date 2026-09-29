@@ -150,20 +150,92 @@ class HealthEndpointTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             Settings(ENVIRONMENT="unexpected")
 
+    def test_ingestion_ai_scope_uses_its_larger_documentation_budget(self):
+        with ai_request_scope(
+            "ingestion-budget-test",
+            "test-user",
+            "test-project",
+            max_provider_calls=2,
+            max_input_tokens=20,
+            max_seconds=120,
+        ) as run:
+            run.consume_provider_call(5)
+            run.consume_provider_call(5)
+            self.assertGreater(run.remaining_seconds(), 100)
+            with self.assertRaises(AIBudgetExceeded):
+                run.consume_provider_call(1)
+
     def test_postgres_disables_client_side_prepared_statements(self):
         options = build_engine_options("postgresql+psycopg://user:password@pooler/db")
 
         self.assertIsNone(options["connect_args"]["prepare_threshold"])
         self.assertTrue(options["pool_pre_ping"])
 
-    def test_default_ingestion_preserves_source_code_without_llm_calls(self):
+    def test_required_ingestion_documents_source_without_llm_calls(self):
         source_path = TEST_PATH / "preserve_me.py"
         original = "def answer():\n    return 42\n"
         source_path.write_text(original, encoding="utf-8")
         previous_setting = settings.ENABLE_LLM_CODE_COMMENTING
         settings.ENABLE_LLM_CODE_COMMENTING = False
         try:
-            result = commenter_node({
+            with patch("agents.commenter.model_router.invoke_text") as invoke_text:
+                result = commenter_node({
+                    "unprocessed_files": [str(source_path)],
+                    "processed_files": [],
+                    "comment_report": [],
+                })
+        finally:
+            settings.ENABLE_LLM_CODE_COMMENTING = previous_setting
+
+        documented = source_path.read_text(encoding="utf-8")
+        invoke_text.assert_not_called()
+        self.assertIn("# This python file contains application source code and related logic.", documented)
+        self.assertIn("# Function answer contains the logic for this part of the application.", documented)
+        self.assertIn("    return 42", documented)
+        compile(documented, str(source_path), "exec")
+        self.assertEqual(result["processed_files"], [str(source_path)])
+        self.assertEqual(result["comment_report"][0]["status"], "commented")
+        self.assertEqual(result["comment_report"][0]["provider"], "deterministic")
+
+    def test_llm_documentation_adds_comments_without_replacing_logic(self):
+        source_path = TEST_PATH / "document_me.py"
+        original = "def calculate_total(values):\n    return sum(values)\n"
+        source_path.write_text(original, encoding="utf-8")
+        previous_setting = settings.ENABLE_LLM_CODE_COMMENTING
+        settings.ENABLE_LLM_CODE_COMMENTING = True
+        response = json.dumps({
+            "file_summary": "Provides total calculation helpers.",
+            "symbols": {
+                "function:calculate_total:1": "Calculates and returns the sum of the supplied values."
+            },
+        })
+        try:
+            with patch(
+                "agents.commenter.model_router.invoke_text",
+                return_value=(response, {"provider": "groq", "model": "test-model"}),
+            ):
+                result = commenter_node({
+                    "unprocessed_files": [str(source_path)],
+                    "processed_files": [],
+                    "comment_report": [],
+                })
+        finally:
+            settings.ENABLE_LLM_CODE_COMMENTING = previous_setting
+
+        documented = source_path.read_text(encoding="utf-8")
+        self.assertIn("# Provides total calculation helpers.", documented)
+        self.assertIn("# Calculates and returns the sum of the supplied values.", documented)
+        self.assertIn("def calculate_total(values):\n    return sum(values)", documented)
+        compile(documented, str(source_path), "exec")
+        self.assertEqual(result["comment_report"][0]["provider"], "groq")
+
+    def test_html_documentation_keeps_doctype_first(self):
+        source_path = TEST_PATH / "index.html"
+        source_path.write_text("<!DOCTYPE html>\n<html><body>Hello</body></html>\n", encoding="utf-8")
+        previous_setting = settings.ENABLE_LLM_CODE_COMMENTING
+        settings.ENABLE_LLM_CODE_COMMENTING = False
+        try:
+            commenter_node({
                 "unprocessed_files": [str(source_path)],
                 "processed_files": [],
                 "comment_report": [],
@@ -171,9 +243,9 @@ class HealthEndpointTests(unittest.TestCase):
         finally:
             settings.ENABLE_LLM_CODE_COMMENTING = previous_setting
 
-        self.assertEqual(source_path.read_text(encoding="utf-8"), original)
-        self.assertEqual(result["processed_files"], [str(source_path)])
-        self.assertEqual(result["comment_report"][0]["status"], "preserved_original")
+        documented = source_path.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(documented[0], "<!DOCTYPE html>")
+        self.assertTrue(documented[1].startswith("<!-- "))
 
     def test_local_embeddings_are_deterministic_and_fixed_width(self):
         embeddings = LocalHashingEmbeddings()

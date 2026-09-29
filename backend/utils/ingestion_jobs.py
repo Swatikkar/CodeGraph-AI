@@ -203,7 +203,14 @@ def execute_job(job_id: int) -> None:
     heartbeat_thread = threading.Thread(target=_heartbeat, args=(job_id, heartbeat_stop), daemon=True)
     heartbeat_thread.start()
     try:
-        with ai_request_scope(f"ingestion-{job_id}-attempt-{attempt_count}", user_id, project_slug):
+        with ai_request_scope(
+            f"ingestion-{job_id}-attempt-{attempt_count}",
+            user_id,
+            project_slug,
+            max_provider_calls=settings.INGESTION_AI_MAX_PROVIDER_CALLS,
+            max_input_tokens=settings.INGESTION_AI_MAX_TOTAL_INPUT_TOKENS,
+            max_seconds=settings.INGESTION_AI_MAX_SECONDS,
+        ):
             _run_pipeline(job_id, user_id, project_slug)
         raise_if_cancelled(job_id)
         db = SessionLocal()

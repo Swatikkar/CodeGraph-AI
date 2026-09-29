@@ -67,8 +67,8 @@ class Settings(BaseSettings):
     )
     COMMENTER_CODE_DOCS_MODELS: str = (
         "groq:openai/gpt-oss-20b,"
+        "nvidia:openai/gpt-oss-120b,"
         "gemini:gemini-2.5-flash-lite,"
-        "ollama:qwen2.5-coder:3b,"
         "openrouter:cohere/north-mini-code:free"
     )
     ARCHITECTURE_DESIGN_MODELS: str = (
@@ -102,7 +102,7 @@ class Settings(BaseSettings):
     PROVIDER_CIRCUIT_FAILURES: int = 3
     PROVIDER_CIRCUIT_COOLDOWN_SECONDS: float = 60.0
     MODEL_TEMPERATURE: float = 0.1
-    ENABLE_LLM_CODE_COMMENTING: bool = False
+    ENABLE_LLM_CODE_COMMENTING: bool = True
     ENABLE_LLM_ARCHITECTURE: bool = False
     TRUSTED_SEARCH_DOMAINS: str = (
         "react.dev,nextjs.org,vite.dev,developer.mozilla.org,docs.python.org,"
@@ -170,6 +170,9 @@ class Settings(BaseSettings):
     AI_MAX_TOTAL_INPUT_TOKENS: int = 60_000
     AI_MAX_OUTPUT_TOKENS: int = 4_096
     AI_MAX_REQUEST_SECONDS: float = 75.0
+    INGESTION_AI_MAX_PROVIDER_CALLS: int = 300
+    INGESTION_AI_MAX_TOTAL_INPUT_TOKENS: int = 500_000
+    INGESTION_AI_MAX_SECONDS: float = 900.0
     AGENT_MAX_TOOL_CALLS: int = 4
     AGENT_MAX_DUPLICATE_TOOL_CALLS: int = 1
     AI_METRICS_RETENTION_DAYS: int = 30
@@ -211,6 +214,9 @@ class Settings(BaseSettings):
             "AI_MAX_TOTAL_INPUT_TOKENS": self.AI_MAX_TOTAL_INPUT_TOKENS,
             "AI_MAX_OUTPUT_TOKENS": self.AI_MAX_OUTPUT_TOKENS,
             "AI_MAX_REQUEST_SECONDS": self.AI_MAX_REQUEST_SECONDS,
+            "INGESTION_AI_MAX_PROVIDER_CALLS": self.INGESTION_AI_MAX_PROVIDER_CALLS,
+            "INGESTION_AI_MAX_TOTAL_INPUT_TOKENS": self.INGESTION_AI_MAX_TOTAL_INPUT_TOKENS,
+            "INGESTION_AI_MAX_SECONDS": self.INGESTION_AI_MAX_SECONDS,
             "AGENT_MAX_TOOL_CALLS": self.AGENT_MAX_TOOL_CALLS,
         }
         invalid = [name for name, value in positive_values.items() if value <= 0]
