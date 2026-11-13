@@ -7,6 +7,7 @@ import {
 } from "react";
 import axios from "axios";
 import { API_URL } from "../config/api";
+import { isAuthenticationFailure } from "../utils/authToken";
 
 const AuthContext = createContext();
 axios.defaults.withCredentials = true;
@@ -49,6 +50,22 @@ export const AuthProvider = ({ children }) => {
   useEffect(() => {
     Promise.resolve().then(() => fetchUser());
   }, [fetchUser]);
+
+  useEffect(() => {
+    const interceptorId = axios.interceptors.response.use(
+      (response) => response,
+      (error) => {
+        if (isAuthenticationFailure(error)) {
+          setAuthenticated(false);
+          setUser(null);
+          setLoading(false);
+        }
+        return Promise.reject(error);
+      },
+    );
+
+    return () => axios.interceptors.response.eject(interceptorId);
+  }, []);
 
   return (
     <AuthContext.Provider value={{ token: authenticated, user, login, logout, loading }}>
