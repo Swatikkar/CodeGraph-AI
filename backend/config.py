@@ -115,7 +115,10 @@ class Settings(BaseSettings):
 
     JWT_SECRET_KEY: str = "fallback_secret_key"
     JWT_ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
+    # The application currently uses a single HttpOnly access cookie without a
+    # refresh-token flow. Keep it long enough for repository ingestion and an
+    # interview/demo session to finish without expiring mid-workspace.
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     OPENROUTER_API_KEY: str | None = None
     GROQ_API_KEY: str | None = None
     GEMINI_API_KEY: str | None = None
