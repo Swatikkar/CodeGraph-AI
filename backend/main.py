@@ -220,6 +220,31 @@ def normalize_ai_content(raw_content) -> str:
     return str(text_value) if text_value is not None else ""
 
 
+def final_state_answer(
+    state,
+    accumulated: str,
+    user_id: int | str,
+    slug: str,
+    public_project_name: str,
+) -> str:
+    """Return a final graph answer that was not emitted as streaming chunks."""
+    if not state or not state.values or "messages" not in state.values:
+        return ""
+    for message in reversed(state.values["messages"]):
+        if getattr(message, "type", None) != "ai" or not getattr(message, "content", None):
+            continue
+        content = sanitize_user_facing_text(
+            normalize_ai_content(message.content),
+            user_id,
+            slug,
+            public_project_name,
+        )
+        if "ROUTE_TO_DEBUGGER" not in content and content not in accumulated:
+            return content
+        break
+    return ""
+
+
 @app.get("/api/health")
 async def health():
     return {
@@ -712,12 +737,6 @@ async def handle_chat_interaction(
                         yield emit("chunk", content=content)
 
                 state = chat_graph_app.get_state(config)
-                if storage_enabled() and accumulated.strip():
-                    db_session = SessionLocal()
-                    try:
-                        persist_chat_message(db_session, current_user.id, slug, "bot", accumulated)
-                    finally:
-                        db_session.close()
                 if state and state.values and state.values.get("provider_events"):
                     for event in state.values["provider_events"]:
                         if not isinstance(event, dict):
@@ -733,19 +752,23 @@ async def handle_chat_interaction(
                                 prompt_id=event.get("prompt_id"),
                                 prompt_version=event.get("prompt_version"),
                             )
-                if state and state.values and "messages" in state.values:
-                    for message in reversed(state.values["messages"]):
-                        if getattr(message, "type", None) == "ai" and getattr(message, "content", None):
-                            final_content = sanitize_user_facing_text(
-                                normalize_ai_content(message.content),
-                                current_user.id,
-                                slug,
-                                public_project_name,
-                            )
-                            if "ROUTE_TO_DEBUGGER" not in final_content and final_content not in accumulated:
-                                accumulated += final_content
-                                yield emit("chunk", content=final_content)
-                            break
+                final_content = final_state_answer(
+                    state,
+                    accumulated,
+                    current_user.id,
+                    slug,
+                    public_project_name,
+                )
+                if final_content:
+                    accumulated += final_content
+                    yield emit("chunk", content=final_content)
+
+                if storage_enabled() and accumulated.strip():
+                    db_session = SessionLocal()
+                    try:
+                        persist_chat_message(db_session, current_user.id, slug, "bot", accumulated)
+                    finally:
+                        db_session.close()
 
                 if accumulated:
                     references.update(extract_answer_references(accumulated))
