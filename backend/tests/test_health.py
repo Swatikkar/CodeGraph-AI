@@ -43,6 +43,7 @@ from main import (
     analyze_error_screenshot,
     app,
     extract_answer_references,
+    final_state_answer,
     local_chat_thread_id,
     normalize_ai_content,
     release_local_ingestion_slot,
@@ -80,6 +81,14 @@ from utils.storage import project_root
 class ChatThreadIdentityTests(unittest.TestCase):
     def test_local_chat_uses_stable_project_scoped_checkpoint(self):
         self.assertEqual(local_chat_thread_id(17, "demo-project"), "user_17_demo-project")
+
+    def test_state_only_answer_is_available_for_durable_persistence(self):
+        state = SimpleNamespace(values={"messages": [AIMessage(content="Final answer")]})
+
+        self.assertEqual(
+            final_state_answer(state, "", 17, "demo-project", "Demo Project"),
+            "Final answer",
+        )
 
 
 class HealthEndpointTests(unittest.TestCase):
