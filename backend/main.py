@@ -148,6 +148,11 @@ class ChatPayload(BaseModel):
     approval_proposal_id: str | None = Field(default=None, min_length=32, max_length=64)
 
 
+def local_chat_thread_id(user_id: int | str, project_slug: str) -> str:
+    """Return the stable project-scoped checkpoint key used by local chat history."""
+    return f"user_{user_id}_{project_slug}"
+
+
 def reserve_local_ingestion_slot(user_id: int | str, project_name: str) -> bool:
     key = (str(user_id), slugify_project_name(project_name))
     with _active_ingestions_lock:
@@ -549,7 +554,7 @@ async def get_chat_history(project_name: str, current_user=Depends(get_current_u
     if storage_enabled():
         return {"messages": read_chat_messages(db, current_user.id, slug)}
 
-    authenticated_thread_id = f"user_{current_user.id}_{slug}"
+    authenticated_thread_id = local_chat_thread_id(current_user.id, slug)
     config = {"configurable": {"thread_id": authenticated_thread_id}}
     state = chat_graph_app.get_state(config)
     messages = []
@@ -602,7 +607,7 @@ async def handle_chat_interaction(
     trace_id = getattr(request.state, "request_id", uuid.uuid4().hex)
     authenticated_thread_id = (
         f"request_{trace_id}" if storage_enabled()
-        else f"user_{current_user.id}_{slug}_{payload.thread_id}"
+        else local_chat_thread_id(current_user.id, slug)
     )
     project_id = project_namespace(current_user.id, slug)
     config = {"configurable": {"thread_id": authenticated_thread_id}}
